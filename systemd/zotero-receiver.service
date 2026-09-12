@@ -1,0 +1,12 @@
+[Unit]
+Description=Zotero Connector Receiver (Mock Zotero per a Firefox)
+After=network.target
+
+[Service]
+ExecStart=/home/casimir/.local/bin/zotero-receiver
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

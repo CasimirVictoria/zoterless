@@ -1,0 +1,649 @@
+#!/usr/bin/env python3
+"""
+zotero-receiver: Emula el servidor local de Zotero al port 23119.
+Rep peticions de Zotero Connector a Firefox i desa directament els articles
+a biblioteca.bib, el PDF a pdfs/{citekey}.pdf i la nota a notes/@{citekey}.md.
+
+Característiques avançades:
+- Reconeixement automàtic de DOI (via camp DOI, extra, URL de catàleg Primo/Dialnet o cerca Crossref pel títol).
+- Metadades canòniques des de Crossref per evitar entrades incompletes de catàlegs de biblioteques.
+- Descàrrega automàtica de PDF en accés obert mitjançant Unpaywall i scraping de metadades.
+- Detecció i enllaç automàtic de PDFs descarregats recentment a ~/Downloads/ (mitjançant anàlisi de text pdftotext).
+- Compatibilitat amb la visualització directa de PDFs a Firefox (tant en línia com locals file://).
+- Notificacions d'escriptori KDE.
+"""
+
+import http.server
+import json
+import os
+import re
+import socketserver
+import subprocess
+import sys
+import time
+import unicodedata
+from pathlib import Path
+from urllib.parse import quote, unquote, urljoin
+from urllib.request import Request, urlopen
+
+BIB_FILE = Path.home() / "Documents/Biblioteca/biblioteca.bib"
+PDF_DIR = Path.home() / "Documents/Biblioteca/pdfs"
+NOTES_DIR = Path.home() / "Documents/notes"
+DOWNLOADS_DIR = Path.home() / "Downloads"
+PORT = 23119
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+}
+
+STOPWORDS = {
+    "a", "an", "the", "and", "or", "of", "in", "on", "at", "to", "for", "with",
+    "by", "from", "as", "is", "study", "per", "al", "de", "la", "el", "els",
+    "les", "y", "en", "sobre", "un", "una", "los", "las", "del", "dels", "e", "o", "u"
+}
+
+def notify(title, message, urgency="normal"):
+    """Envia una notificació d'escriptori mitjançant notify-send."""
+    try:
+        subprocess.run(
+            ["notify-send", "-a", "Biblioteca", "-u", urgency, "-i", "accessories-dictionary", title, message],
+            check=False
+        )
+    except Exception:
+        pass
+
+def strip_accents(text):
+    """Translitera caràcters accentuats a caràcters ASCII equivalents (ex: á -> a, ñ -> n)."""
+    if not text:
+        return ""
+    normalized = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in normalized if not unicodedata.combining(c))
+
+def clean_latex(text):
+    """Neteja caràcters LaTeX per a cadenes de text net."""
+    if not text:
+        return ""
+    text = re.sub(r"\\['`^\"~]\{?([a-zA-Z])\}?", r"\1", text)
+    text = re.sub(r'[\{\}\\]', '', text)
+    text = text.replace('\n', ' ')
+    return re.sub(r'\s+', ' ', text).strip()
+
+def clean_title_for_search(title):
+    """Elimina afegits típics de catàlegs de biblioteques com ' - Universidad de Valencia'."""
+    if not title:
+        return ""
+    cleaned = re.sub(
+        r'\s*[-–—|]\s*(Universidad|Universitat|Dialnet|UV|UVEG|repositori|Library|Catalog|Catálogo|Revista).*$',
+        '',
+        title,
+        flags=re.IGNORECASE
+    ).strip()
+    return cleaned if cleaned else title
+
+def clean_author_surname(first_author):
+    """Extreu el primer cognom de forma neta evitant partícules ('de', 'la', 'van') i normalitzant accents."""
+    raw = first_author.split(',')[0].strip() if ',' in first_author else first_author.split(' and ')[0].strip()
+    raw = re.sub(r'[\{\}\\]', '', raw).strip()
+    raw = strip_accents(raw)
+    parts = raw.split()
+    particles = {"de", "del", "la", "van", "von", "der", "el", "al", "da", "di"}
+    while parts and parts[0].lower() in particles:
+        parts.pop(0)
+    if parts:
+        last_name = parts[0].lower()
+    else:
+        last_name = "desconegut"
+    return re.sub(r'[^a-z\-]', '', last_name) or "desconegut"
+
+def generate_citekey(first_author, title, year):
+    """Genera citekey normalitzada a l'estil Better BibTeX: autorTitolAny."""
+    last_name = clean_author_surname(first_author)
+    title_clean = strip_accents(clean_latex(title))
+    title_words = re.findall(r'[a-zA-Z0-9]+', title_clean)
+    significant_words = [w.capitalize() for w in title_words if w.lower() not in STOPWORDS]
+    short_title = "".join(significant_words[:3]) if significant_words else "Doc"
+    year_str = str(year) if year else ""
+    return f"{last_name}{short_title}{year_str}"
+
+def extract_field(name, text):
+    """Extreu el valor d'un camp BibTeX tenint en compte claus niades."""
+    m = re.search(rf'\b{name}\s*=\s*', text, re.IGNORECASE)
+    if not m:
+        return ""
+    start = m.end()
+    if start >= len(text):
+        return ""
+    if text[start] == '{':
+        depth = 0
+        val = []
+        for ch in text[start:]:
+            if ch == '{':
+                depth += 1
+                if depth > 1:
+                    val.append(ch)
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    break
+                val.append(ch)
+            else:
+                val.append(ch)
+        return "".join(val)
+    elif text[start] == '"':
+        m_quote = re.search(r'^"([^"]*)"', text[start:])
+        return m_quote.group(1) if m_quote else ""
+    else:
+        m_bare = re.match(r'^([^,\n]+)', text[start:])
+        return m_bare.group(1).strip() if m_bare else ""
+
+def extract_doi_from_text(text):
+    """Cerca un patró de DOI en un text o URL."""
+    if not text:
+        return None
+    # DOI estàndard
+    m = re.search(r'\b(10\.\d{4,9}/[^\s"<>#]+)', text)
+    if m:
+        return m.group(1).rstrip(".,;)>]")
+    # Catàleg Primo codificat: cdi_crossref_primary_10_18172_con_6302 o similar
+    m_primo = re.search(r'(?:primary|doi)[/_](10_\d{4,9}_[^/?&\s]+)', text)
+    if m_primo:
+        cand = m_primo.group(1)
+        # Convertir el primer guió baix en punt i el segon en barra
+        parts = cand.split('_', 2)
+        if len(parts) >= 3:
+            doi_cand = f"{parts[0]}.{parts[1]}/{parts[2].replace('_', '.')}"
+            return doi_cand
+    return None
+
+def extract_doi_from_pdf(pdf_path):
+    """Extreu el DOI directament de les primeres pàgines del fitxer PDF emprant pdftotext."""
+    if not Path(pdf_path).is_file():
+        return None
+    try:
+        res = subprocess.run(
+            ["pdftotext", "-l", "3", str(pdf_path), "-"],
+            capture_output=True, text=True, timeout=6
+        )
+        if res.returncode == 0 and res.stdout:
+            doi = extract_doi_from_text(res.stdout)
+            if doi:
+                return doi
+    except Exception:
+        pass
+    return None
+
+def search_crossref_by_title(title):
+    """Cerca a Crossref per títol per recuperar el DOI oficial."""
+    clean_title = clean_title_for_search(title)
+    if not clean_title or len(clean_title) < 8:
+        return None
+    try:
+        q = quote(clean_title)
+        url = f"https://api.crossref.org/works?query.bibliographic={q}&rows=1"
+        req = Request(url, headers={**HEADERS, "User-Agent": "BibliotecaResearch/1.0 (mailto:casimir.research@uv.es)"})
+        with urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            items = data.get("message", {}).get("items", [])
+            if items:
+                doi = items[0].get("DOI")
+                found_title = items[0].get("title", [""])[0]
+                # Comprovació bàsica de coincidència
+                words_clean = set(re.findall(r'[a-zA-Z0-9]+', clean_title.lower()))
+                words_found = set(re.findall(r'[a-zA-Z0-9]+', found_title.lower()))
+                overlap = len(words_clean & words_found)
+                if overlap >= min(3, len(words_clean)):
+                    return doi
+    except Exception as e:
+        print(f"Error cercant DOI a Crossref: {e}", file=sys.stderr)
+    return None
+
+def fetch_bibtex_from_doi(doi):
+    """Obté el registre BibTeX oficial des de doi.org per negociació de continguts."""
+    try:
+        url = f"https://doi.org/{doi}"
+        req = Request(url, headers={**HEADERS, "Accept": "application/x-bibtex"})
+        with urlopen(req, timeout=12) as resp:
+            bib = resp.read().decode("utf-8", errors="ignore").strip()
+            if bib.startswith("@"):
+                return bib
+    except Exception as e:
+        print(f"Error obtenint BibTeX per a {doi}: {e}", file=sys.stderr)
+    return None
+
+def find_unpaywall_pdf(doi):
+    """Consulta Unpaywall per trobar la URL directa del PDF en accés obert."""
+    if not doi:
+        return None
+    try:
+        url = f"https://api.unpaywall.org/v2/{doi}?email=casimir.research@gmail.com"
+        req = Request(url, headers=HEADERS)
+        with urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            best = data.get("best_oa_location")
+            if best and best.get("url_for_pdf"):
+                return best["url_for_pdf"]
+    except Exception as e:
+        print(f"Unpaywall error: {e}", file=sys.stderr)
+    return None
+
+def download_pdf_with_curl(pdf_url, target_path):
+    """Descarrega el fitxer PDF amb curl seguint redireccions i enllaços interns OJS/Dialnet."""
+    temp_target = target_path.with_suffix(".tmp")
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        cmd = [
+            "curl", "-sL", "--max-time", "35",
+            "-A", HEADERS["User-Agent"],
+            "-o", str(temp_target),
+            pdf_url
+        ]
+        subprocess.run(cmd, check=False)
+        if temp_target.is_file():
+            data = temp_target.read_bytes()
+            if data.startswith(b"%PDF"):
+                temp_target.replace(target_path)
+                return True
+            # Intentar detectar enllaç intern HTML
+            html = data.decode("utf-8", errors="ignore")
+            m = re.search(r'<meta\s+name=["\']citation_pdf_url["\']\s+content=["\']([^"\']+)["\']', html, re.I)
+            if not m:
+                m = re.search(r'<meta\s+content=["\']([^"\']+)["\']\s+name=["\']citation_pdf_url["\']', html, re.I)
+            if not m:
+                m = re.search(r'href=["\']([^"\']+/article/download/[^"\']+)["\']', html, re.I)
+            if not m:
+                m = re.search(r'href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', html, re.I)
+            if m:
+                effective_pdf = urljoin(pdf_url, m.group(1))
+                cmd2 = [
+                    "curl", "-sL", "--max-time", "35",
+                    "-A", HEADERS["User-Agent"],
+                    "-o", str(temp_target),
+                    effective_pdf
+                ]
+                subprocess.run(cmd2, check=False)
+                if temp_target.is_file():
+                    data2 = temp_target.read_bytes()
+                    if data2.startswith(b"%PDF"):
+                        temp_target.replace(target_path)
+                        return True
+        if temp_target.is_file():
+            temp_target.unlink()
+    except Exception as e:
+        print(f"Error descarregant PDF: {e}", file=sys.stderr)
+    return False
+
+def find_recent_matching_pdf(citekey, title, first_author, doi, max_age_seconds=1800):
+    """
+    Cerca a ~/Downloads PDFs descarregats recentment que coincidisquen amb el document.
+    Comprova mtime, nom de fitxer i contingut de text (pdftotext).
+    """
+    if not DOWNLOADS_DIR.is_dir():
+        return None
+        
+    candidates = []
+    now = time.time()
+    for f in DOWNLOADS_DIR.glob("*.pdf"):
+        try:
+            mtime = f.stat().st_mtime
+            age = now - mtime
+            if age <= max_age_seconds:
+                candidates.append((f, age))
+        except Exception:
+            pass
+            
+    if not candidates:
+        return None
+        
+    candidates.sort(key=lambda x: x[1])
+    
+    doi_clean = doi.lower() if doi else ""
+    author_clean = first_author.lower() if first_author else ""
+    title_words = [w.lower() for w in re.findall(r'[a-zA-Z0-9]+', title) if len(w) > 3]
+    
+    best_file = None
+    best_score = 0
+    
+    for f, age in candidates:
+        score = 0
+        fname = f.name.lower()
+        if author_clean and author_clean in fname:
+            score += 35
+        if doi_clean and any(part in fname for part in doi_clean.split("/") if len(part) > 3):
+            score += 45
+        for tw in title_words[:5]:
+            if tw in fname:
+                score += 10
+                
+        # Comprovar la primera pàgina de text
+        try:
+            res = subprocess.run(
+                ["pdftotext", "-l", "1", str(f), "-"],
+                capture_output=True, text=True, timeout=3
+            )
+            txt = res.stdout.lower()
+            if doi_clean and doi_clean in txt:
+                score += 100
+            if author_clean and author_clean in txt:
+                score += 40
+            matching_words = sum(1 for tw in title_words if tw in txt)
+            score += matching_words * 5
+        except Exception:
+            pass
+            
+        # Si s'ha descarregat fa menys de 2 minuts
+        if age < 120 and score > 0:
+            score += 20
+            
+        if score > best_score and score >= 30:
+            best_score = score
+            best_file = f
+            
+    return best_file
+
+def key_exists_in_bib(key, bib_file):
+    """Comprova si una clau ja existeix a biblioteca.bib."""
+    if not bib_file.is_file():
+        return False
+    content = bib_file.read_text(encoding="utf-8", errors="ignore")
+    return bool(re.search(rf'@[a-zA-Z]+\s*\{{\s*{re.escape(key)}\s*,', content))
+
+def append_or_update_bib(citekey, item_type, fields, bib_file):
+    """Afegeix una entrada o actualitza el camp 'file' si abans faltava."""
+    bib_file.parent.mkdir(parents=True, exist_ok=True)
+    if not key_exists_in_bib(citekey, bib_file):
+        lines = [f"@{item_type}{{{citekey},"]
+        for k, v in fields.items():
+            if v:
+                lines.append(f"  {k} = {{{v}}},")
+        lines.append("}")
+        entry = "\n".join(lines)
+        with open(bib_file, "a", encoding="utf-8") as f:
+            f.write(f"\n{entry}\n")
+    else:
+        # Si ja existeix, comprovar si cal afegir o actualitzar el camp 'file'
+        content = bib_file.read_text(encoding="utf-8", errors="ignore")
+        pdf_file = fields.get("file")
+        if pdf_file and f"file = {{{pdf_file}}}" not in content:
+            # Substituir o afegir file
+            m = re.search(rf'(@[a-zA-Z]+\s*\{{\s*{re.escape(citekey)}\s*,[\s\S]*?)(}})', content)
+            if m:
+                block = m.group(1)
+                if "file =" in block:
+                    new_block = re.sub(r'file\s*=\s*\{[^}]*\}', f'file = {{{pdf_file}}}', block)
+                else:
+                    new_block = block.rstrip()
+                    if not new_block.endswith(','):
+                        new_block += ','
+                    new_block += f"\n  file = {{{pdf_file}}}\n"
+                new_content = content[:m.start()] + new_block + "}" + content[m.end():]
+                bib_file.write_text(new_content, encoding="utf-8")
+
+def process_zotero_item(item):
+    """Processa un element rebut des de Zotero Connector i el desa a la biblioteca."""
+    raw_title = item.get("title", "")
+    item_url = item.get("url", "")
+    extra = item.get("extra", "")
+    item_type_raw = item.get("itemType", "")
+    
+    # 1. Si és un adjunt o PDF directe (per exemple, visualitzat a Firefox)
+    local_source_pdf = None
+    if item_url.startswith("file://"):
+        local_path = Path(unquote(item_url[7:]))
+        if local_path.is_file():
+            local_source_pdf = local_path
+            
+    # 2. Resolució de DOI
+    doi = item.get("DOI", "") or item.get("doi", "")
+    if not doi:
+        doi = extract_doi_from_text(extra)
+    if not doi:
+        doi = extract_doi_from_text(item_url)
+    if not doi and local_source_pdf:
+        doi = extract_doi_from_pdf(local_source_pdf)
+        
+    # Processar autors inicials
+    creators = item.get("creators", [])
+    author_list = []
+    first_author_lastname = "desconegut"
+    for c in creators:
+        if c.get("lastName"):
+            name = c["lastName"]
+            if c.get("firstName"):
+                name += f", {c['firstName']}"
+            author_list.append(name)
+            if first_author_lastname == "desconegut":
+                first_author_lastname = c["lastName"]
+        elif c.get("name"):
+            author_list.append(c["name"])
+            if first_author_lastname == "desconegut":
+                first_author_lastname = c["name"].split()[-1]
+
+    # Si no tenim DOI o els autors estan incomplets ("Desconegut"), cercar a Crossref pel títol
+    if (not doi or first_author_lastname == "desconegut") and raw_title:
+        discovered_doi = search_crossref_by_title(raw_title)
+        if discovered_doi:
+            doi = discovered_doi
+
+    # 3. Recuperar metadades canòniques des de Crossref si tenim DOI
+    canonical_bib = None
+    if doi:
+        canonical_bib = fetch_bibtex_from_doi(doi)
+
+    title = raw_title
+    year = ""
+    journal = ""
+    volume = ""
+    issue = ""
+    pages = ""
+    item_type = "article"
+
+    if canonical_bib:
+        # Emprar les dades precises de Crossref
+        cr_title = extract_field("title", canonical_bib)
+        if cr_title:
+            title = cr_title
+        cr_author = extract_field("author", canonical_bib)
+        if cr_author:
+            author_str = cr_author
+            first_author_lastname = clean_author_surname(cr_author)
+        else:
+            author_str = " and ".join(author_list) if author_list else "Desconegut"
+            
+        year = extract_field("year", canonical_bib)
+        journal = extract_field("journal", canonical_bib)
+        volume = extract_field("volume", canonical_bib)
+        issue = extract_field("number", canonical_bib)
+        pages = extract_field("pages", canonical_bib)
+        
+        m_type = re.match(r'@([a-zA-Z]+)\{', canonical_bib)
+        if m_type:
+            item_type = m_type.group(1).lower()
+    else:
+        # Emprar les dades proporcionades pel Connector
+        if not author_list:
+            author_list = ["Desconegut"]
+        author_str = " and ".join(author_list)
+        
+        raw_date = str(item.get("date", ""))
+        year_match = re.search(r'\b(19\d\d|20\d\d)\b', raw_date)
+        year = year_match.group(1) if year_match else ""
+        
+        journal = item.get("publicationTitle", "") or item.get("journal", "")
+        volume = item.get("volume", "")
+        issue = item.get("issue", "")
+        pages = item.get("pages", "")
+        
+        if item_type_raw in ["journalArticle", "magazineArticle", "newspaperArticle"]:
+            item_type = "article"
+        elif item_type_raw == "book":
+            item_type = "book"
+        elif item_type_raw == "bookSection":
+            item_type = "incollection"
+        else:
+            item_type = "misc"
+
+    # 4. Citekey
+    citekey = generate_citekey(first_author_lastname, title, year)
+    target_pdf = PDF_DIR / f"{citekey}.pdf"
+    pdf_saved = False
+
+    # 5. Adquisició del PDF
+    if target_pdf.is_file():
+        pdf_saved = True
+    elif local_source_pdf and local_source_pdf.is_file():
+        # Cas fitxer local ja obert
+        try:
+            PDF_DIR.mkdir(parents=True, exist_ok=True)
+            import shutil
+            shutil.copy2(local_source_pdf, target_pdf)
+            pdf_saved = True
+        except Exception as e:
+            print(f"Error copiant fitxer local: {e}", file=sys.stderr)
+
+    # 5a. Adjunts de Zotero
+    if not pdf_saved:
+        attachments = item.get("attachments", [])
+        for att in attachments:
+            att_url = att.get("url", "")
+            mime = att.get("mimeType", "")
+            if att_url.startswith("file://"):
+                att_local = Path(unquote(att_url[7:]))
+                if att_local.is_file():
+                    import shutil
+                    PDF_DIR.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(att_local, target_pdf)
+                    pdf_saved = True
+                    break
+            elif mime == "application/pdf" or att_url.lower().endswith(".pdf") or "download" in att_url.lower():
+                if download_pdf_with_curl(att_url, target_pdf):
+                    pdf_saved = True
+                    break
+
+    # 5b. Unpaywall (Open Access directe)
+    if not pdf_saved and doi:
+        unpaywall_url = find_unpaywall_pdf(doi)
+        if unpaywall_url:
+            if download_pdf_with_curl(unpaywall_url, target_pdf):
+                pdf_saved = True
+
+    # 5c. Detecció a ~/Downloads (per si l'usuari ha baixat o obert el PDF abans o manualment)
+    if not pdf_saved:
+        matched_download = find_recent_matching_pdf(citekey, title, first_author_lastname, doi)
+        if matched_download and matched_download.is_file():
+            try:
+                import shutil
+                PDF_DIR.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(matched_download, target_pdf)
+                pdf_saved = True
+            except Exception as e:
+                print(f"Error associant PDF des de Downloads: {e}", file=sys.stderr)
+
+    # 6. Desar a biblioteca.bib
+    fields = {
+        "title": title,
+        "author": author_str,
+        "year": year,
+        "journal": journal,
+        "volume": volume,
+        "number": issue,
+        "pages": pages,
+        "doi": doi,
+        "url": item_url,
+        "file": str(target_pdf) if pdf_saved else ""
+    }
+    append_or_update_bib(citekey, item_type, fields, BIB_FILE)
+
+    # 7. Crear nota a notes/@citekey.md
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    note_path = NOTES_DIR / f"@{citekey}.md"
+    if not note_path.is_file():
+        note_content = f"""---
+title: "{clean_latex(title)}"
+author: "{clean_latex(author_str)}"
+year: {year}
+citekey: "@{citekey}"
+doi: "{doi}"
+tags: []
+---
+# Idees clau
+
+* 
+"""
+        note_path.write_text(note_content, encoding="utf-8")
+
+    # 8. Notificació d'èxit
+    pdf_status = "📄 PDF desat" if pdf_saved else "⚠️ Sense PDF"
+    short_title = clean_latex(title)
+    if len(short_title) > 60:
+        short_title = short_title[:57] + "..."
+    notify(f"📚 Zotero: @{citekey}", f"{short_title}\n{pdf_status} | 📝 Nota creada")
+
+class ZoteroHandler(http.server.BaseHTTPRequestHandler):
+    def send_cors_headers(self, status=200, content_type="application/json"):
+        self.send_response(status)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("X-Zotero-Version", "7.0.0")
+        self.send_header("X-Zotero-Connector-API-Version", "3")
+        self.send_header("Content-Type", content_type)
+        self.end_headers()
+
+    def do_OPTIONS(self):
+        self.send_cors_headers(200)
+
+    def do_GET(self):
+        if "/connector/ping" in self.path:
+            self.send_cors_headers(200, "text/html; charset=utf-8")
+            self.wfile.write(b"<!DOCTYPE html><html><body>Zotero is running</body></html>")
+        else:
+            self.send_cors_headers(200)
+            self.wfile.write(b'{"version":"7.0.0"}')
+
+    do_HEAD = do_GET
+
+    def do_POST(self):
+        content_len = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_len).decode("utf-8", errors="ignore")
+        
+        if "/connector/getSelectedCollection" in self.path:
+            self.send_cors_headers(200)
+            resp = {"libraryID": 1, "libraryName": "Biblioteca", "collection": None, "editable": True}
+            self.wfile.write(json.dumps(resp).encode("utf-8"))
+            return
+
+        if "/connector/ping" in self.path:
+            self.send_cors_headers(200, "text/html; charset=utf-8")
+            self.wfile.write(b"<!DOCTYPE html><html><body>Zotero is running</body></html>")
+            return
+
+        if "/connector/saveItems" in self.path:
+            try:
+                payload = json.loads(body)
+                items = payload.get("data", {}).get("items", []) or payload.get("items", [])
+                for it in items:
+                    process_zotero_item(it)
+            except Exception as e:
+                print(f"Error processant saveItems: {e}", file=sys.stderr)
+                
+            self.send_cors_headers(201)
+            self.wfile.write(b'{"success":true}')
+            return
+
+        self.send_cors_headers(200)
+        self.wfile.write(b'{"success":true}')
+
+    def log_message(self, format, *args):
+        pass
+
+def run():
+    socketserver.TCPServer.allow_reuse_address = True
+    with socketserver.TCPServer(("127.0.0.1", PORT), ZoteroHandler) as httpd:
+        print(f"📡 Servidor Zotero Receiver avançat escoltant a http://127.0.0.1:{PORT}...")
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nAturant servidor...")
+
+if __name__ == "__main__":
+    run()
