@@ -238,6 +238,24 @@ flowchart TD
 
 ---
 
+## 🙏 Agraïments i Reconeixements
+
+Aquest projecte és un tribut sincer al programari lliure i s'alça directament sobre les espatlles dels gegants que han definit el flux de treball acadèmic modern:
+
+- A l'equip de **Zotero** i de la Corporation for Digital Scholarship pel seu insubstituïble **Zotero Connector**, que continua sent la millor eina del món per capturar literatura científica directament des del navegador.
+- A **Emiliano Heyns** (*retorquere*) pel monumental treball d'enginyeria amb **Better BibTeX (BBT)**, el referent absolut de com han de ser les claus de citació canòniques i predictibles.
+- Als desenvolupadors de **ZotMoov** i **ZotFile**, pioners en la idea d'extreure i reanomenar PDFs per alliberar-los de bases de dades tancades.
+- A l'autor de **Better Notes**, per mostrar el camí cap a la integració atòmica entre literatura acadèmica i notes en Markdown.
+- Als projectes de ciència oberta i eines lliures: **OpenAlex**, **Crossref**, **ERIC (IES)**, **Dialnet**, **Unpaywall** i **Argos Translate**.
+
+### 🤖 Autoria i Desenvolupament
+- **Concepció, visió del flux i necessitats d'investigació:** Casimir Victoria (@CasimirVictoria).
+- **Implementació tècnica i desenvolupament del codi:** Creat i afinat en programació en parella (*pair programming*) amb l'agent d'intel·ligència artificial **Antigravity** de Google DeepMind.
+
+> *"Aquest programari ha nascut de la necessitat pràctica d'un flux de treball acadèmic fluid, sobirà i basat estrictament en text pla. Com a investigador, he aportat les idees, l'experiència d'usuari i la direcció del disseny; la programació i la implementació tècnica del codi han estat dutes a terme per Antigravity."* — Casimir Victoria
+
+---
+
 ## 📄 Llicència
 
 Distribuït sota la llicència [MIT](LICENSE). Desenvolupat amb passió pel programari lliure i la simplicitat de UNIX.
