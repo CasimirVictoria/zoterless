@@ -16,6 +16,7 @@ Flux:
 9. Mostra una notificació nativa a l'escriptori KDE.
 """
 
+import concurrent.futures
 import json
 import os
 import re
@@ -123,7 +124,7 @@ def search_openalex_list(query, limit=5):
         q = quote(query.strip())
         url = f"https://api.openalex.org/works?search={q}&per_page={limit}&sort=relevance_score:desc&mailto=casimir@users.noreply.github.com"
         req = Request(url, headers=HEADERS)
-        with urlopen(req, timeout=12) as resp:
+        with urlopen(req, timeout=6) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             results = []
             for item in data.get("results", []):
@@ -138,22 +139,22 @@ def search_openalex_list(query, limit=5):
                     "doi": doi,
                     "is_oa": is_oa,
                     "oa_url": oa_url,
-                    "id": item.get("id", "")
+                    "id": item.get("id", ""),
+                    "source": "OpenAlex"
                 })
             return results
     except Exception as e:
-        print(f"Error a la cerca d'OpenAlex: {e}", file=sys.stderr)
         return []
 
 def search_crossref_list(query, limit=5):
-    """Cerca de reserva a Crossref si OpenAlex no retorna resultats."""
+    """Cerca a Crossref directament al registre oficial de DOIs."""
     if not query:
         return []
     try:
         q = quote(query.strip())
         url = f"https://api.crossref.org/works?query={q}&rows={limit}&mailto=casimir@users.noreply.github.com"
         req = Request(url, headers=HEADERS)
-        with urlopen(req, timeout=12) as resp:
+        with urlopen(req, timeout=6) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             items = data.get("message", {}).get("items", [])
             results = []
@@ -178,12 +179,152 @@ def search_crossref_list(query, limit=5):
                     "doi": doi,
                     "is_oa": False,
                     "oa_url": "",
-                    "id": doi
+                    "id": doi,
+                    "source": "Crossref"
                 })
             return results
     except Exception as e:
-        print(f"Error a la cerca de Crossref: {e}", file=sys.stderr)
         return []
+
+def search_eric_list(query, limit=5):
+    """Cerca a ERIC (Education Resources Information Center) de l'Institut de Ciències de l'Educació."""
+    if not query:
+        return []
+    try:
+        q = quote(query.strip())
+        url = f"https://api.ies.ed.gov/eric/?search={q}&rows={limit}&format=json"
+        req = Request(url, headers=HEADERS)
+        with urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            docs = data.get("response", {}).get("docs", [])
+            results = []
+            for d in docs:
+                authors = d.get("author", [])
+                if isinstance(authors, str):
+                    authors = [authors]
+                eid = d.get("id", "")
+                is_ed = eid.startswith("ED")
+                results.append({
+                    "title": d.get("title", "Sense títol"),
+                    "authors": authors,
+                    "year": str(d.get("publicationdateyear") or d.get("pubyear", "")),
+                    "doi": "",
+                    "eric_id": eid,
+                    "is_oa": is_ed,
+                    "oa_url": f"https://files.eric.ed.gov/fulltext/{eid}.pdf" if is_ed else "",
+                    "source": "ERIC"
+                })
+            return results
+    except Exception:
+        return []
+
+def search_dialnet_list(query, limit=5):
+    """Cerca a Dialnet literatura acadèmica en espanyol i català."""
+    if not query:
+        return []
+    try:
+        q = quote(query.strip())
+        url = f"https://dialnet.unirioja.es/buscar/documentos?querysDismax.DOCUMENTAL_TODO={q}"
+        req = Request(url, headers=HEADERS)
+        with urlopen(req, timeout=5) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+            matches = re.finditer(
+                r"<li\s+id=[\'\"]articulo(\d+)[\'\"][^>]*>.*?<p\s+class=[\'\"]titulo[\'\"]>.*?<a\s+href=[\'\"][^>]*codigo=(\d+)[^>]*>([^<]+)</a>(.*?)<p\s+class=[\'\"]autores[\'\"]>(.*?)</p>",
+                html, re.DOTALL | re.IGNORECASE
+            )
+            results = []
+            for m in matches:
+                codigo = m.group(2)
+                title = m.group(3).strip()
+                autores_html = m.group(5)
+                authors = [a.strip() for a in re.findall(r"<a[^>]*>([^<]+)</a>", autores_html)]
+                results.append({
+                    "title": title,
+                    "authors": authors,
+                    "year": "",
+                    "doi": "",
+                    "dialnet_id": codigo,
+                    "is_oa": True,
+                    "oa_url": f"https://dialnet.unirioja.es/descarga/articulo/{codigo}.pdf",
+                    "source": "Dialnet"
+                })
+                if len(results) >= limit:
+                    break
+            return results
+    except Exception:
+        return []
+
+def normalize_title(t):
+    """Normalitza un títol per a comparació i deduplicació (sense accents, minúscules, alfanumèric)."""
+    if not t:
+        return ""
+    clean = strip_accents(clean_latex(t)).lower()
+    return re.sub(r'[^a-z0-9]', '', clean)
+
+def federated_search(query, limit_per_source=5):
+    """Cerca en paral·lel a OpenAlex, ERIC, Crossref i Dialnet amb fusió i deduplicació intel·ligent."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        f_oa = executor.submit(search_openalex_list, query, limit_per_source)
+        f_er = executor.submit(search_eric_list, query, limit_per_source)
+        f_cr = executor.submit(search_crossref_list, query, limit_per_source)
+        f_dn = executor.submit(search_dialnet_list, query, limit_per_source)
+        
+        all_items = []
+        for f in [f_oa, f_er, f_cr, f_dn]:
+            try:
+                res = f.result(timeout=6)
+                if res:
+                    all_items.extend(res)
+            except Exception:
+                pass
+                
+    merged = []
+    doi_map = {}
+    title_map = {}
+    
+    for item in all_items:
+        if "sources" not in item:
+            item["sources"] = [item.get("source", "Desconegut")]
+            
+        doi = (item.get("doi") or "").lower().strip()
+        norm_t = normalize_title(item.get("title", ""))
+        
+        existing = None
+        if doi and doi in doi_map:
+            existing = doi_map[doi]
+        elif norm_t and len(norm_t) > 15 and norm_t in title_map:
+            existing = title_map[norm_t]
+            
+        if existing:
+            # Fussionar les fonts sense duplicats
+            for s in item["sources"]:
+                if s not in existing["sources"]:
+                    existing["sources"].append(s)
+            # Enriquir camps complementaris
+            if not existing.get("doi") and doi:
+                existing["doi"] = doi
+                doi_map[doi] = existing
+            if not existing.get("year") and item.get("year"):
+                existing["year"] = item["year"]
+            if not existing.get("is_oa") and item.get("is_oa"):
+                existing["is_oa"] = True
+                existing["oa_url"] = item.get("oa_url", "")
+            if not existing.get("dialnet_id") and item.get("dialnet_id"):
+                existing["dialnet_id"] = item["dialnet_id"]
+            if not existing.get("eric_id") and item.get("eric_id"):
+                existing["eric_id"] = item["eric_id"]
+            if len(item.get("authors", [])) > len(existing.get("authors", [])):
+                existing["authors"] = item["authors"]
+        else:
+            merged.append(item)
+            if doi:
+                doi_map[doi] = item
+            if norm_t and len(norm_t) > 15:
+                title_map[norm_t] = item
+
+    # Ordenar: prioritzar els articles trobats a múltiples fonts i amb accés obert
+    merged.sort(key=lambda x: (len(x.get("sources", [])), 1 if x.get("is_oa") else 0), reverse=True)
+    return merged
 
 def extract_doi_from_html(url):
     """Extreu el DOI d'una pàgina web acadèmica a través de les metadades HTML."""
@@ -764,7 +905,7 @@ def process_paper_input(raw_input):
     process_paper_by_doi(doi, direct_pdf=direct_pdf)
 
 def interactive_search(initial_query=""):
-    """Mode interactiu: cerca a OpenAlex / Crossref i permet a l'usuari triar l'article a afegir."""
+    """Mode interactiu: cerca federada en paral·lel a OpenAlex, ERIC, Crossref i Dialnet amb deduplicació."""
     query = initial_query.strip()
     if not query:
         try:
@@ -777,20 +918,17 @@ def interactive_search(initial_query=""):
         print("Cerca buida. Eixint.")
         return
 
-    print(f"\n🔍 Cercant a OpenAlex: \"{query}\"...")
-    results = search_openalex_list(query, limit=5)
-    if not results:
-        print("Sense resultats a OpenAlex, provant Crossref...")
-        results = search_crossref_list(query, limit=5)
-        
+    print(f"\n🔍 Cercant en paral·lel a OpenAlex, ERIC, Crossref i Dialnet: \"{query}\"...")
+    results = federated_search(query, limit_per_source=5)
     if not results:
         print("❌ No s'ha trobat cap article amb aquests termes.")
         return
 
-    print("\n" + "=" * 76)
-    print(f"📚 Resultats de la cerca per a: \"{query}\"")
-    print("=" * 76)
-    for idx, item in enumerate(results, 1):
+    display_count = min(len(results), 10)
+    print("\n" + "=" * 78)
+    print(f"📚 Resultats federats per a: \"{query}\" ({len(results)} articles únics trobats)")
+    print("=" * 78)
+    for idx, item in enumerate(results[:display_count], 1):
         year_str = f"({item['year']}) " if item.get('year') else ""
         authors = item.get("authors", [])
         if len(authors) > 2:
@@ -800,19 +938,24 @@ def interactive_search(initial_query=""):
         else:
             author_str = "Autor desconegut"
             
+        sources_str = " | ".join(item.get("sources", []))
         oa_badge = "🟢 Accés Obert" if item.get("is_oa") else "🔒 Sense OA directe"
-        doi_str = f"DOI: {item['doi']}" if item.get('doi') else "Sense DOI registrat"
+        doi_str = f"DOI: {item['doi']}" if item.get('doi') else (
+            f"Dialnet: {item['dialnet_id']}" if item.get('dialnet_id') else (
+                f"ERIC: {item['eric_id']}" if item.get('eric_id') else "Sense DOI registrat"
+            )
+        )
         
-        print(f"[{idx}] {year_str}{author_str}")
+        print(f"[{idx}] [{sources_str}] {year_str}{author_str}")
         print(f"    Títol: {clean_latex(item['title'])}")
         print(f"    {doi_str} | {oa_badge}")
         print()
     print("[q] Cancel·lar i eixir")
-    print("=" * 76)
+    print("=" * 78)
     
     while True:
         try:
-            choice = input(f"Selecciona un article [1-{len(results)}] (o 'q' per eixir): ").strip().lower()
+            choice = input(f"Selecciona un article [1-{display_count}] (o 'q' per eixir): ").strip().lower()
         except (KeyboardInterrupt, EOFError):
             print("\nCancel·lat.")
             return
@@ -820,16 +963,29 @@ def interactive_search(initial_query=""):
         if choice in ("q", "quit", "exit", ""):
             print("Operació cancel·lada.")
             return
-        if choice.isdigit() and 1 <= int(choice) <= len(results):
+        if choice.isdigit() and 1 <= int(choice) <= display_count:
             selected = results[int(choice) - 1]
             break
-        print(f"Opció no vàlida. Introdueix un número entre 1 i {len(results)}.")
+        print(f"Opció no vàlida. Introdueix un número entre 1 i {display_count}.")
 
     print(f"\n🚀 Processant selecció: {clean_latex(selected['title'])[:60]}...")
     doi = selected.get("doi")
     direct_pdf = selected.get("oa_url")
+    dialnet_id = selected.get("dialnet_id")
+    eric_id = selected.get("eric_id")
+
     if doi:
         process_paper_by_doi(doi, direct_pdf=direct_pdf)
+    elif dialnet_id:
+        process_paper_input(f"https://dialnet.unirioja.es/servlet/articulo?codigo={dialnet_id}")
+    elif eric_id and direct_pdf:
+        meta = {
+            "title": selected.get("title", ""),
+            "authors": selected.get("authors", []),
+            "year": selected.get("year", ""),
+            "pdf_url": direct_pdf
+        }
+        process_paper_input("data:" + json.dumps(meta))
     else:
         process_paper_input(selected["title"])
 
@@ -841,7 +997,7 @@ Afegeix articles a la biblioteca BibTeX (~/Documents/Biblioteca/biblioteca.bib),
 descarrega el PDF automàticament a pdfs/ i en crea la nota Markdown a notes/@citekey.md.
 
 Opcions:
-  -s, --search [TERMES]   Cerca interactiva a OpenAlex / Crossref
+  -s, --search [TERMES]   Cerca interactiva federada (OpenAlex, ERIC, Crossref, Dialnet)
   --vpn                   Connecta automàticament a EduVPN UV abans de la descàrrega
   -h, --help              Mostra aquesta ajuda
 
