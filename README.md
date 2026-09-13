@@ -182,6 +182,45 @@ Quan un article pertany a una editorial sota subscripció (ScienceDirect, Spring
 
 ---
 
+## 🧬 Ecosistema i Integració amb Segon Cervell (Cervell2)
+
+`zoterless` està dissenyat segons la **filosofia UNIX: fes una sola cosa i fes-la a la perfecció**. En lloc de convertir-se en un monòlit que ho faça tot, s'integra de forma nativa i desacoblada amb sistemes de gestió del coneixement personal (PKM) com **[Cervell2](https://github.com/CasimirVictoria/Cervell2)**:
+
+```mermaid
+flowchart TD
+    subgraph Ingesta ["CAPA D'INGESTA: zoterless (24 MB)"]
+        Firefox["Firefox + Zotero Connector"] --> Receiver["zotero-receiver (Port 23119)"]
+        CLI["add-paper (CLI multilingüe Argos)"]
+    end
+
+    subgraph Truth ["FONT DE VERITAT (Text Pla Estàndard)"]
+        Bib["~/Documents/Biblioteca/biblioteca.bib"]
+        PDFs["~/Documents/Biblioteca/pdfs/"]
+        Notes["~/Documents/notes/@citekey.md"]
+    end
+
+    subgraph PKM ["CAPA D'ANÀLISI: Cervell2 (Desktop Qt & Web Hub)"]
+        GUI["Cervell2 Desktop / Web"]
+        Rerank["Cerca Semàntica (Sentence-Transformers)"]
+        Viewer["Visor PDF amb Subratllats Persistents"]
+        NLM["Google NotebookLM Studio"]
+    end
+
+    Receiver --> Truth
+    CLI --> Truth
+
+    Truth <--> GUI
+    Truth <--> Rerank
+    Truth <--> Viewer
+    Truth <--> NLM
+```
+
+- **`zoterless` s'encarrega de l'operació ràpida:** Ingesta instantània des de Firefox o terminal, resolució DOI canònica, descàrrega i normalització a fitxers plans.
+- **`Cervell2` s'encarrega de la profunditat intel·lectual:** Reordenació semàntica dels resultats, lectura i subratllat vinculat a notes, connexió amb quaderns de NotebookLM i càlcul simbòlic.
+- **Zero bloqueig (*No vendor lock-in*):** Si `Cervell2` no està obert, `zoterless` funciona al 100% de la seua potència. Si `zoterless` actualitza un document, `Cervell2` el detecta a l'instant perquè llegeixen els mateixos fitxers.
+
+---
+
 ## 📄 Llicència
 
 Distribuït sota la llicència [MIT](LICENSE). Desenvolupat amb passió pel programari lliure i la simplicitat de UNIX.
