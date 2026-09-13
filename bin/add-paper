@@ -99,6 +99,32 @@ def get_clipboard_text():
         pass
     return ""
 
+def reconstruct_abstract(inv):
+    """Reconstrueix el text de l'abstract a partir de l'inverted index d'OpenAlex."""
+    if not inv or not isinstance(inv, dict):
+        return ""
+    word_pos = []
+    for word, positions in inv.items():
+        for pos in positions:
+            word_pos.append((pos, word))
+    word_pos.sort()
+    return " ".join(w for _, w in word_pos)
+
+def fetch_abstract_from_openalex(doi):
+    """Obté i reconstrueix el resum de l'article a través de l'API d'OpenAlex."""
+    if not doi:
+        return ""
+    try:
+        clean_doi = doi.replace("https://doi.org/", "").strip()
+        url = f"https://api.openalex.org/works/https://doi.org/{quote(clean_doi)}?mailto=casimir@users.noreply.github.com"
+        req = Request(url, headers=HEADERS)
+        with urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            inv = data.get("abstract_inverted_index")
+            return reconstruct_abstract(inv)
+    except Exception:
+        return ""
+
 def search_openalex(title_query):
     """Cerca a OpenAlex pel títol per trobar si l'article té DOI o PDF d'accés obert."""
     if not title_query:
@@ -132,11 +158,14 @@ def search_openalex_list(query, limit=5):
                 doi = (item.get("doi") or "").replace("https://doi.org/", "").strip()
                 oa_url = item.get("open_access", {}).get("oa_url") or ""
                 is_oa = item.get("open_access", {}).get("is_oa", False)
+                inv = item.get("abstract_inverted_index")
+                abstract = reconstruct_abstract(inv) if inv else ""
                 results.append({
                     "title": item.get("display_name", "Sense títol"),
                     "authors": authors,
                     "year": str(item.get("publication_year", "")),
                     "doi": doi,
+                    "abstract": abstract,
                     "is_oa": is_oa,
                     "oa_url": oa_url,
                     "id": item.get("id", ""),
@@ -172,11 +201,14 @@ def search_crossref_list(query, limit=5):
                 if parts:
                     year = str(parts[0])
                 doi = item.get("DOI", "")
+                raw_abs = item.get("abstract", "")
+                abstract = re.sub(r'<[^>]+>', '', raw_abs).strip() if raw_abs else ""
                 results.append({
                     "title": title,
                     "authors": authors,
                     "year": year,
                     "doi": doi,
+                    "abstract": abstract,
                     "is_oa": False,
                     "oa_url": "",
                     "id": doi,
@@ -204,11 +236,13 @@ def search_eric_list(query, limit=5):
                     authors = [authors]
                 eid = d.get("id", "")
                 is_ed = eid.startswith("ED")
+                abstract = d.get("description", "")
                 results.append({
                     "title": d.get("title", "Sense títol"),
                     "authors": authors,
                     "year": str(d.get("publicationdateyear") or d.get("pubyear", "")),
                     "doi": "",
+                    "abstract": abstract,
                     "eric_id": eid,
                     "is_oa": is_ed,
                     "oa_url": f"https://files.eric.ed.gov/fulltext/{eid}.pdf" if is_ed else "",
@@ -380,6 +414,8 @@ def federated_search(query, limit_per_source=5):
                 existing["dialnet_id"] = item["dialnet_id"]
             if not existing.get("eric_id") and item.get("eric_id"):
                 existing["eric_id"] = item["eric_id"]
+            if not existing.get("abstract") and item.get("abstract"):
+                existing["abstract"] = item["abstract"]
             if len(item.get("authors", [])) > len(existing.get("authors", [])):
                 existing["authors"] = item["authors"]
         else:
@@ -761,7 +797,7 @@ def format_and_append_bibtex(raw_bib, citekey, pdf_path, bib_file):
     with open(bib_file, "a", encoding="utf-8") as f:
         f.write(f"\n{formatted}\n")
 
-def create_initial_note(citekey, title, author, year, notes_dir):
+def create_initial_note(citekey, title, author, year, notes_dir, abstract="", doi=""):
     """Crea una nota inicial en Markdown per a l'article si no existeix."""
     notes_dir.mkdir(parents=True, exist_ok=True)
     note_path = notes_dir / f"@{citekey}.md"
@@ -769,20 +805,33 @@ def create_initial_note(citekey, title, author, year, notes_dir):
         return
         
     author_clean = clean_latex(" and ".join(author) if isinstance(author, list) else str(author))
-    note_content = f"""---
-title: "{clean_latex(title)}"
-author: "{author_clean}"
-year: {year}
-citekey: "@{citekey}"
-tags: []
----
-# Idees clau
+    abs_clean = re.sub(r'<[^>]+>', '', str(abstract)).strip() if abstract else ""
 
-* 
-"""
+    lines = [
+        "---",
+        f'title: "{clean_latex(title)}"',
+        f'author: "{author_clean}"',
+        f'year: {year}',
+        f'citekey: "@{citekey}"'
+    ]
+    if doi:
+        lines.append(f'doi: "{doi}"')
+    lines.extend([
+        "tags: []",
+        "---",
+        "# Resum / Abstract",
+        "",
+        abs_clean,
+        "",
+        "# Idees clau",
+        "",
+        "* ",
+        ""
+    ])
+    note_content = "\n".join(lines)
     note_path.write_text(note_content, encoding="utf-8")
 
-def process_paper_by_doi(doi, direct_pdf=None):
+def process_paper_by_doi(doi, direct_pdf=None, abstract=None):
     """Processa un article a partir del seu DOI canònic."""
     notify("Biblioteca", f"🔍 Processant article...\nDOI: {doi}")
     print(f"🔍 Obtenint metadades de Crossref per a: {doi}...")
@@ -799,6 +848,13 @@ def process_paper_by_doi(doi, direct_pdf=None):
     title = extract_field("title", raw_bib)
     year = extract_field("year", raw_bib)
     citekey = generate_citekey(author, title, year)
+    
+    raw_bib_abstract = extract_field("abstract", raw_bib)
+    if raw_bib_abstract:
+        raw_bib_abstract = re.sub(r'<[^>]+>', '', raw_bib_abstract).strip()
+    final_abstract = abstract or raw_bib_abstract
+    if not final_abstract:
+        final_abstract = fetch_abstract_from_openalex(doi)
     
     if key_exists_in_bib(citekey, BIB_FILE):
         msg = f"ℹ️ L'article ja existeix a la biblioteca: @{citekey}"
@@ -831,7 +887,7 @@ def process_paper_by_doi(doi, direct_pdf=None):
                 pdf_saved = download_pdf(unpaywall_url, target_pdf)
             
     format_and_append_bibtex(raw_bib, citekey, target_pdf, BIB_FILE)
-    create_initial_note(citekey, title, author, year, NOTES_DIR)
+    create_initial_note(citekey, title, author, year, NOTES_DIR, abstract=final_abstract, doi=doi)
     
     if pdf_saved:
         pdf_status = "📄 PDF desat"
@@ -920,7 +976,7 @@ def process_paper_input(raw_input):
             with open(BIB_FILE, "a", encoding="utf-8") as f:
                 f.write(f"\n{bib_entry}\n")
                 
-        create_initial_note(citekey, title, authors, year, NOTES_DIR)
+        create_initial_note(citekey, title, authors, year, NOTES_DIR, abstract=meta.get("abstract", ""))
         pdf_status = "📄 PDF desat" if pdf_saved else "⚠️ Sense PDF automàtic"
         notify(f"📚 Article afegit: @{citekey}", f"{clean_latex(title)[:55]}...\n{pdf_status} | 📝 Nota creada")
         print(f"✅ Article afegit: @{citekey} ({pdf_status})")
@@ -932,7 +988,7 @@ def process_paper_input(raw_input):
         doi, direct_pdf, dialnet_title, meta = resolve_dialnet(raw_input)
         if doi:
             print(f"✅ DOI trobat a Dialnet/OpenAlex: {doi}")
-            process_paper_by_doi(doi, direct_pdf=direct_pdf)
+            process_paper_by_doi(doi, direct_pdf=direct_pdf, abstract=meta.get("abstract", ""))
             return
         elif meta.get("title"):
             first_author = meta.get("authors", ["Desconegut"])[0] if meta.get("authors") else "Desconegut"
@@ -946,7 +1002,7 @@ def process_paper_input(raw_input):
             bib_entry = build_bibtex_from_dict(citekey, meta, target_pdf)
             with open(BIB_FILE, "a", encoding="utf-8") as f:
                 f.write(f"\n{bib_entry}\n")
-            create_initial_note(citekey, meta["title"], meta.get("authors", []), meta.get("year", ""), NOTES_DIR)
+            create_initial_note(citekey, meta["title"], meta.get("authors", []), meta.get("year", ""), NOTES_DIR, abstract=meta.get("abstract", ""))
             pdf_status = "📄 PDF desat" if pdf_saved else "⚠️ Sense PDF automàtic"
             notify(f"📚 Article Dialnet afegit: @{citekey}", f"{clean_latex(meta['title'])[:55]}...\n{pdf_status} | 📝 Nota creada")
             print(f"✅ Article Dialnet afegit: @{citekey} ({pdf_status})")
@@ -1042,7 +1098,7 @@ def interactive_search(initial_query=""):
     eric_id = selected.get("eric_id")
 
     if doi:
-        process_paper_by_doi(doi, direct_pdf=direct_pdf)
+        process_paper_by_doi(doi, direct_pdf=direct_pdf, abstract=selected.get("abstract", ""))
     elif dialnet_id:
         process_paper_input(f"https://dialnet.unirioja.es/servlet/articulo?codigo={dialnet_id}")
     elif eric_id and direct_pdf:
@@ -1050,6 +1106,7 @@ def interactive_search(initial_query=""):
             "title": selected.get("title", ""),
             "authors": selected.get("authors", []),
             "year": selected.get("year", ""),
+            "abstract": selected.get("abstract", ""),
             "pdf_url": direct_pdf
         }
         process_paper_input("data:" + json.dumps(meta))

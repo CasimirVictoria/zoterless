@@ -635,6 +635,13 @@ def process_zotero_item(item):
                 print(f"Error associant PDF des de Downloads: {e}", file=sys.stderr)
 
     # 6. Desar a biblioteca.bib
+    raw_abstract = ""
+    if canonical_bib:
+        raw_abstract = extract_field("abstract", canonical_bib)
+    if not raw_abstract:
+        raw_abstract = item.get("abstractNote", "") or item.get("abstract", "")
+    abstract_clean = re.sub(r'<[^>]+>', '', str(raw_abstract)).strip() if raw_abstract else ""
+
     fields = {
         "title": title,
         "author": author_str,
@@ -647,6 +654,8 @@ def process_zotero_item(item):
         "url": item_url,
         "file": str(target_pdf) if pdf_saved else ""
     }
+    if abstract_clean:
+        fields["abstract"] = abstract_clean
     append_or_update_bib(citekey, item_type, fields, BIB_FILE)
 
     # 7. Crear nota a notes/@citekey.md
@@ -661,6 +670,10 @@ citekey: "@{citekey}"
 doi: "{doi}"
 tags: []
 ---
+# Resum / Abstract
+
+{abstract_clean}
+
 # Idees clau
 
 * 
