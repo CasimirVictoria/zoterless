@@ -227,7 +227,7 @@ def find_unpaywall_pdf(doi):
     return None
 
 def scrape_pdf_links_from_html(html, base_url):
-    """Extreu enllaços de descàrrega de PDF a partir de l'HTML (estil KBibTeX / Highwire / OJS)."""
+    """Extreu enllaços de descàrrega de PDF a partir de l'HTML (estil KBibTeX / Dialnet / RODERIC / DSpace / Highwire)."""
     candidates = []
     # 1. Metadades acadèmiques estàndard (Highwire Press, Dublin Core, Eprints, Google Scholar)
     for m in re.finditer(r'<meta\s+name=["\'](?:citation_pdf_url|dc\.identifier|eprints\.document_url)["\']\s+content=["\']([^"\']+)["\']', html, re.I):
@@ -241,7 +241,21 @@ def scrape_pdf_links_from_html(html, base_url):
     # 3. Enllaços OJS /article/download/
     for m in re.finditer(r'href=["\']([^"\']+/article/download/[^"\']+)["\']', html, re.I):
         candidates.append(m.group(1))
-    # 4. Enllaços directes a fitxers .pdf
+    # 4. Dialnet direct download links (/descarga/articulo/XXXXXX.pdf)
+    for m in re.finditer(r'href=["\']([^"\']*/descarga/articulo/[^"\']+)["\']', html, re.I):
+        candidates.append(m.group(1))
+    # 5. Repositoris DSpace universitaris (RODERIC UV, RiuNet UPV, RUA UA, TDX Tesis)
+    for m in re.finditer(r'href=["\']([^"\']*/bitstream/[^"\']+(?:\.pdf)?[^"\']*)["\']', html, re.I):
+        candidates.append(m.group(1))
+    # 6. Editorials internacionals (Springer, Wiley, ScienceDirect, IEEE, ACM)
+    for m in re.finditer(r'href=["\']([^"\']*(?:/doi/pdf/|/doi/epdf/|/content/pdf/)[^"\']*)["\']', html, re.I):
+        candidates.append(m.group(1))
+    # 7. Classes de botons de descàrrega típiques
+    for m in re.finditer(r'<a\b[^>]*class=["\'][^"\']*\b(?:c-pdf-download__link|pdf-download|download-pdf|article-btn-pdf|coolBar__ctrl|pdf-link)\b[^"\']*["\'][^>]*\bhref=["\']([^"\']+)["\']', html, re.I):
+        candidates.append(m.group(1))
+    for m in re.finditer(r'<a\b[^>]*\bhref=["\']([^"\']+)["\'][^>]*class=["\'][^"\']*\b(?:c-pdf-download__link|pdf-download|download-pdf|article-btn-pdf|coolBar__ctrl|pdf-link)\b[^"\']*["\']', html, re.I):
+        candidates.append(m.group(1))
+    # 8. Enllaços directes a fitxers .pdf
     for m in re.finditer(r'href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', html, re.I):
         candidates.append(m.group(1))
         
@@ -551,7 +565,16 @@ def process_zotero_item(item):
             ojs_dl = item_url.replace("/article/view/", "/article/download/")
             if download_pdf_with_curl(ojs_dl, target_pdf):
                 pdf_saved = True
-        # Provar scraping de la pàgina web (on està l'etiqueta citation_pdf_url com a KBibTeX)
+
+        # Si és Dialnet (servlet/articulo?codigo=XXXXX), provar directament la descàrrega
+        if not pdf_saved and "dialnet.unirioja.es/servlet/articulo" in item_url:
+            m_dn = re.search(r'codigo=(\d+)', item_url)
+            if m_dn:
+                dialnet_dl = f"https://dialnet.unirioja.es/descarga/articulo/{m_dn.group(1)}.pdf"
+                if download_pdf_with_curl(dialnet_dl, target_pdf):
+                    pdf_saved = True
+
+        # Provar scraping de la pàgina web (on estan les etiquetes citation_pdf_url o botons de descàrrega)
         if not pdf_saved:
             if download_pdf_with_curl(item_url, target_pdf):
                 pdf_saved = True
