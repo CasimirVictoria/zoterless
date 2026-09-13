@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 """
 add-paper: Afegeix un article científic a la biblioteca a partir d'un DOI, arXiv, URL o metadades.
-Llegeix l'entrada de la línia d'ordres, del marcador de Firefox o del portapapers (Wayland/X11).
+Llegeix l'entrada de la línia d'ordres, del cercador interactiu (-s / --search),
+d'un marcador de navegador o del portapapers (Wayland/X11).
 
 Flux:
-1. Reconeix DOI, arXiv o dades estructurades enviades des del navegador (Dialnet, repositoris).
-2. Si no hi ha DOI directe, consulta OpenAlex pel títol per trobar si en té un d'assignat o un PDF lliure.
-3. Obté o construeix l'entrada BibTeX completa.
-4. Genera una citekey normalitzada (estil Better BibTeX: autorTitolAny).
-5. Descarrega el PDF en accés obert (Unpaywall, enllaços directes o metadades citation_pdf_url).
-6. Afegeix l'entrada amb camp 'file' a ~/Documents/Biblioteca/biblioteca.bib.
-7. Crea la nota bibliogràfica a ~/Documents/notes/@citekey.md.
-8. Mostra una notificació nativa a l'escriptori KDE.
+1. Reconeix DOI, arXiv, Dialnet o dades estructurades enviades des del navegador.
+2. Si s'indica -s/--search, cerca interactivament a OpenAlex o Crossref i permet triar l'article.
+3. Si no hi ha DOI directe, cerca a OpenAlex pel títol o resol el codi Dialnet.
+4. Obté l'entrada BibTeX canònica des de Crossref (o construeix BibTeX estructurat).
+5. Genera una citekey normalitzada (estil Better BibTeX: autorTitolAny).
+6. Descarrega el PDF en accés obert (Unpaywall, Dialnet directe, repositoris DSpace o scraping KBibTeX).
+7. Afegeix l'entrada amb el camp 'file' a ~/Documents/Biblioteca/biblioteca.bib.
+8. Crea la nota bibliogràfica a ~/Documents/notes/@citekey.md.
+9. Mostra una notificació nativa a l'escriptori KDE.
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 from urllib.parse import quote, unquote, urljoin
 from urllib.request import Request, urlopen
@@ -40,6 +44,43 @@ def notify(title, message, urgency="normal"):
         )
     except Exception:
         pass
+
+def is_eduvpn_active():
+    """Comprova si la connexió WireGuard / VPN de la universitat (EduVPN) està activa."""
+    try:
+        res = subprocess.run(
+            ["nmcli", "-t", "-f", "NAME", "con", "show", "--active"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                if "eduvpn" in line.strip().lower():
+                    return True
+    except Exception:
+        pass
+    return False
+
+def connect_eduvpn():
+    """Intenta connectar la VPN institucional (EduVPN UV) mitjançant NetworkManager."""
+    try:
+        print("🔒 Connectant a EduVPN per a accés institucional...")
+        res = subprocess.run(
+            ["nmcli", "con", "up", "eduvpn"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if res.returncode == 0:
+            print("🟢 Connexió EduVPN establerta correctament.")
+            return True
+        else:
+            print(f"⚠️ No s'ha pogut connectar EduVPN: {res.stderr.strip() or res.stdout.strip()}")
+            return False
+    except Exception as e:
+        print(f"⚠️ Error connectant EduVPN: {e}")
+        return False
 
 def get_clipboard_text():
     """Llegeix el contingut del portapapers amb suport per a Wayland i X11."""
@@ -74,6 +115,76 @@ def search_openalex(title_query):
         print(f"OpenAlex cercador error: {e}", file=sys.stderr)
     return None
 
+def search_openalex_list(query, limit=5):
+    """Cerca a OpenAlex múltiples resultats amb títol, autors, any, DOI i enllaç OA."""
+    if not query:
+        return []
+    try:
+        q = quote(query.strip())
+        url = f"https://api.openalex.org/works?search={q}&per_page={limit}&sort=relevance_score:desc&mailto=casimir@users.noreply.github.com"
+        req = Request(url, headers=HEADERS)
+        with urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            results = []
+            for item in data.get("results", []):
+                authors = [a.get("author", {}).get("display_name", "") for a in item.get("authorships", [])]
+                doi = (item.get("doi") or "").replace("https://doi.org/", "").strip()
+                oa_url = item.get("open_access", {}).get("oa_url") or ""
+                is_oa = item.get("open_access", {}).get("is_oa", False)
+                results.append({
+                    "title": item.get("display_name", "Sense títol"),
+                    "authors": authors,
+                    "year": str(item.get("publication_year", "")),
+                    "doi": doi,
+                    "is_oa": is_oa,
+                    "oa_url": oa_url,
+                    "id": item.get("id", "")
+                })
+            return results
+    except Exception as e:
+        print(f"Error a la cerca d'OpenAlex: {e}", file=sys.stderr)
+        return []
+
+def search_crossref_list(query, limit=5):
+    """Cerca de reserva a Crossref si OpenAlex no retorna resultats."""
+    if not query:
+        return []
+    try:
+        q = quote(query.strip())
+        url = f"https://api.crossref.org/works?query={q}&rows={limit}&mailto=casimir@users.noreply.github.com"
+        req = Request(url, headers=HEADERS)
+        with urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            items = data.get("message", {}).get("items", [])
+            results = []
+            for item in items:
+                authors = []
+                for a in item.get("author", []):
+                    given = a.get("given", "")
+                    family = a.get("family", "")
+                    name = f"{given} {family}".strip() if given or family else a.get("name", "")
+                    if name:
+                        authors.append(name)
+                title = item.get("title", ["Sense títol"])[0] if item.get("title") else "Sense títol"
+                year = ""
+                parts = item.get("issued", {}).get("date-parts", [[]])[0]
+                if parts:
+                    year = str(parts[0])
+                doi = item.get("DOI", "")
+                results.append({
+                    "title": title,
+                    "authors": authors,
+                    "year": year,
+                    "doi": doi,
+                    "is_oa": False,
+                    "oa_url": "",
+                    "id": doi
+                })
+            return results
+    except Exception as e:
+        print(f"Error a la cerca de Crossref: {e}", file=sys.stderr)
+        return []
+
 def extract_doi_from_html(url):
     """Extreu el DOI d'una pàgina web acadèmica a través de les metadades HTML."""
     try:
@@ -94,8 +205,66 @@ def extract_doi_from_html(url):
         print(f"Error explorant la pàgina web: {e}", file=sys.stderr)
     return None
 
+def resolve_dialnet(text):
+    """Detecta URL o identificador de Dialnet i resol DOI canònic i descàrrega directa de PDF."""
+    m_dn = re.search(r'(?:dialnet\.unirioja\.es/(?:servlet/articulo\?codigo=|descarga/articulo/)|dialnet:)(\d+)', text, re.I)
+    if not m_dn:
+        return None, None, None, {}
+    codigo = m_dn.group(1)
+    pdf_url = f"https://dialnet.unirioja.es/descarga/articulo/{codigo}.pdf"
+    
+    doi = None
+    title = None
+    meta = {"pdf_url": pdf_url}
+    
+    page_url = f"https://dialnet.unirioja.es/servlet/articulo?codigo={codigo}"
+    try:
+        req = Request(page_url, headers=HEADERS)
+        try:
+            with urlopen(req, timeout=8) as resp:
+                html = resp.read().decode("utf-8", errors="ignore")
+        except HTTPError as he:
+            html = he.read().decode("utf-8", errors="ignore")
+            
+        m_doi = re.search(r'<meta\s+name=["\']citation_doi["\']\s+content=["\']([^"\']+)["\']', html, re.I)
+        if m_doi:
+            doi = m_doi.group(1).strip()
+        else:
+            m_doi2 = re.search(r'\b(10\.\d{4,9}/[^\s"<>]+)', html)
+            if m_doi2:
+                doi = m_doi2.group(1).rstrip(".,;)>]")
+                
+        m_title = re.search(r'<meta\s+name=["\']citation_title["\']\s+content=["\']([^"\']+)["\']', html, re.I)
+        if m_title:
+            title = m_title.group(1).strip()
+            meta["title"] = title
+            
+        m_author = re.findall(r'<meta\s+name=["\']citation_author["\']\s+content=["\']([^"\']+)["\']', html, re.I)
+        if m_author:
+            meta["authors"] = [a.strip() for a in m_author]
+            
+        m_date = re.search(r'<meta\s+name=["\']citation_date["\']\s+content=["\']([^"\']+)["\']', html, re.I)
+        if m_date:
+            meta["year"] = m_date.group(1).strip()
+            
+        m_journal = re.search(r'<meta\s+name=["\']citation_journal_title["\']\s+content=["\']([^"\']+)["\']', html, re.I)
+        if m_journal:
+            meta["journal"] = m_journal.group(1).strip()
+
+        # Si tenim el títol però no el DOI directe a Dialnet, cerquem a OpenAlex
+        if title and not doi:
+            oa = search_openalex(title)
+            if oa and oa.get("doi"):
+                doi = oa["doi"].replace("https://doi.org/", "").strip()
+                if not pdf_url and oa.get("open_access", {}).get("oa_url"):
+                    pdf_url = oa["open_access"]["oa_url"]
+    except Exception as e:
+        print(f"Dialnet resolver: {e}", file=sys.stderr)
+        
+    return doi, pdf_url, title, meta
+
 def resolve_doi_or_arxiv(text):
-    """Detecta i normalitza un DOI o identificador d'arXiv a partir de text o URL."""
+    """Detecta i normalitza un DOI, identificador d'arXiv o Dialnet a partir de text o URL."""
     text = unquote(text).strip()
     if not text:
         return None, None
@@ -104,17 +273,25 @@ def resolve_doi_or_arxiv(text):
     text = re.sub(r'^(?:bibtex|bib):\/?\/?', '', text, flags=re.IGNORECASE).strip()
     text = unquote(text).strip()
 
-    # Comprovació arXiv
-    m_arxiv = re.search(r'(?:arxiv\.org/(?:abs|pdf)/|arxiv:)?(\d{4}\.\d{4,5}(?:v\d+)?)', text, re.IGNORECASE)
-    if m_arxiv:
-        arxiv_id = m_arxiv.group(1)
-        return f"10.48550/arXiv.{arxiv_id}", f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-        
-    # Comprovació DOI directe
+    # Comprovació Dialnet
+    if "dialnet" in text.lower() or "codigo=" in text.lower():
+        doi, direct_pdf, title, meta = resolve_dialnet(text)
+        if doi:
+            return doi, direct_pdf
+
+    # 1. Comprovació DOI directe (prioritari: 10.xxxx/...)
     m_doi = re.search(r'\b(10\.\d{4,9}/[^\s"<>]+)', text)
     if m_doi:
         doi = m_doi.group(1).rstrip(".,;)>]")
         return doi, None
+
+    # 2. Comprovació arXiv (amb prefix explícit o número aïllat)
+    m_arxiv = re.search(r'(?:arxiv\.org/(?:abs|pdf)/|arxiv:\s*)(\d{4}\.\d{4,5}(?:v\d+)?)', text, re.IGNORECASE)
+    if not m_arxiv:
+        m_arxiv = re.fullmatch(r'(\d{4}\.\d{4,5}(?:v\d+)?)', text.strip())
+    if m_arxiv:
+        arxiv_id = m_arxiv.group(1)
+        return f"10.48550/arXiv.{arxiv_id}", f"https://arxiv.org/pdf/{arxiv_id}.pdf"
         
     # Si és una URL general, intentar extreure'n el DOI explorant el codi font
     if text.startswith("http://") or text.startswith("https://"):
@@ -131,8 +308,6 @@ def fetch_bibtex_from_doi(doi):
     req = Request(url, headers=headers)
     with urlopen(req, timeout=15) as resp:
         return resp.read().decode("utf-8", errors="ignore").strip()
-
-import unicodedata
 
 def strip_accents(text):
     """Translitera caràcters accentuats a caràcters ASCII equivalents (ex: á -> a, ñ -> n)."""
@@ -241,6 +416,45 @@ def build_bibtex_from_dict(citekey, meta, pdf_path):
     lines.append("}")
     return "\n".join(lines)
 
+def scrape_pdf_links_from_html(html, base_url):
+    """Extreu enllaços de descàrrega de PDF a partir de l'HTML (estil KBibTeX / Dialnet / RODERIC / DSpace / Highwire)."""
+    candidates = []
+    # 1. Metadades acadèmiques estàndard (Highwire Press, Dublin Core, Eprints, Google Scholar)
+    for m in re.finditer(r'<meta\s+name=["\'](?:citation_pdf_url|dc\.identifier|eprints\.document_url)["\']\s+content=["\']([^"\']+)["\']', html, re.I):
+        candidates.append(m.group(1))
+    for m in re.finditer(r'<meta\s+content=["\']([^"\']+)["\']\s+name=["\'](?:citation_pdf_url|dc\.identifier|eprints\.document_url)["\']', html, re.I):
+        candidates.append(m.group(1))
+    # 2. Variables JS incrustades (com 'pdfUrl = "..."' de certs visors)
+    for m in re.finditer(r'(?:var|let|const)?\s*pdfUrl\s*=\s*["\']([^"\']+)["\']', html, re.I):
+        candidates.append(m.group(1))
+    # 3. Enllaços OJS /article/download/
+    for m in re.finditer(r'href=["\']([^"\']+/article/download/[^"\']+)["\']', html, re.I):
+        candidates.append(m.group(1))
+    # 4. Dialnet direct download links (/descarga/articulo/XXXXXX.pdf)
+    for m in re.finditer(r'href=["\']([^"\']*/descarga/articulo/[^"\']+)["\']', html, re.I):
+        candidates.append(m.group(1))
+    # 5. Repositoris DSpace universitaris (RODERIC UV, RiuNet UPV, RUA UA, TDX Tesis)
+    for m in re.finditer(r'href=["\']([^"\']*/bitstream/[^"\']+(?:\.pdf)?[^"\']*)["\']', html, re.I):
+        candidates.append(m.group(1))
+    # 6. Editorials internacionals (Springer, Wiley, ScienceDirect, IEEE, ACM)
+    for m in re.finditer(r'href=["\']([^"\']*(?:/doi/pdf/|/doi/epdf/|/content/pdf/)[^"\']*)["\']', html, re.I):
+        candidates.append(m.group(1))
+    # 7. Classes de botons de descàrrega típiques
+    for m in re.finditer(r'<a\b[^>]*class=["\'][^"\']*\b(?:c-pdf-download__link|pdf-download|download-pdf|article-btn-pdf|coolBar__ctrl|pdf-link)\b[^"\']*["\'][^>]*\bhref=["\']([^"\']+)["\']', html, re.I):
+        candidates.append(m.group(1))
+    for m in re.finditer(r'<a\b[^>]*\bhref=["\']([^"\']+)["\'][^>]*class=["\'][^"\']*\b(?:c-pdf-download__link|pdf-download|download-pdf|article-btn-pdf|coolBar__ctrl|pdf-link)\b[^"\']*["\']', html, re.I):
+        candidates.append(m.group(1))
+    # 8. Enllaços directes a fitxers .pdf
+    for m in re.finditer(r'href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', html, re.I):
+        candidates.append(m.group(1))
+        
+    resolved = []
+    for c in candidates:
+        full_url = urljoin(base_url, c.strip())
+        if full_url not in resolved:
+            resolved.append(full_url)
+    return resolved
+
 def find_pdf_url(doi, direct_pdf=None):
     """Localitza la URL de descàrrega directa del PDF (Unpaywall o metadades)."""
     if direct_pdf:
@@ -261,30 +475,27 @@ def find_pdf_url(doi, direct_pdf=None):
     except Exception as e:
         print(f"Unpaywall: {e}", file=sys.stderr)
         
-    # 2. Consultar directament la pàgina del DOI per metadades citation_pdf_url
+    # 2. Consultar directament la pàgina del DOI per scraping de metadades
     try:
         landing_url = f"https://doi.org/{doi}"
         req = Request(landing_url, headers=HEADERS)
         with urlopen(req, timeout=12) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
-        m = re.search(r'<meta\s+name=["\']citation_pdf_url["\']\s+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
-        m2 = re.search(r'<meta\s+content=["\']([^"\']+)["\']\s+name=["\']citation_pdf_url["\']', html, re.IGNORECASE)
-        if m2:
-            return m2.group(1).strip()
+        candidates = scrape_pdf_links_from_html(html, landing_url)
+        if candidates:
+            return candidates[0]
     except Exception as e:
         print(f"Landing page scrape: {e}", file=sys.stderr)
         
     return None
 
 def download_pdf(pdf_url, target_path):
-    """Descarrega el PDF amb curl, amb suport per seguir enllaços de visualització OJS o Dialnet."""
+    """Descarrega el PDF amb curl, amb suport per seguir enllaços de visualització OJS, Dialnet i repositoris."""
     temp_target = target_path.with_suffix(".tmp")
     target_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         cmd = [
-            "curl", "-sL", "--max-time", "30",
+            "curl", "-skL", "--max-time", "30",
             "-A", HEADERS["User-Agent"],
             "-o", str(temp_target),
             pdf_url
@@ -296,23 +507,15 @@ def download_pdf(pdf_url, target_path):
                 temp_target.replace(target_path)
                 return True
                 
-            # Si hem obtingut una pàgina HTML (com a Dialnet info=link), cerquem l'enllaç del PDF intern
+            # Si hem obtingut una pàgina HTML (com a Dialnet o visors OJS), analitzem els enllaços interns
             html = data.decode("utf-8", errors="ignore")
-            m = re.search(r'<meta\s+name=["\']citation_pdf_url["\']\s+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-            if not m:
-                m = re.search(r'<meta\s+content=["\']([^"\']+)["\']\s+name=["\']citation_pdf_url["\']', html, re.IGNORECASE)
-            if not m:
-                m = re.search(r'href=["\']([^"\']+/article/download/[^"\']+)["\']', html, re.IGNORECASE)
-            if not m:
-                m = re.search(r'href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', html, re.IGNORECASE)
-                
-            if m:
-                effective_pdf = urljoin(pdf_url, m.group(1))
+            candidates = scrape_pdf_links_from_html(html, pdf_url)
+            for cand in candidates:
                 cmd2 = [
-                    "curl", "-sL", "--max-time", "30",
+                    "curl", "-skL", "--max-time", "30",
                     "-A", HEADERS["User-Agent"],
                     "-o", str(temp_target),
-                    effective_pdf
+                    cand
                 ]
                 subprocess.run(cmd2, check=False)
                 if temp_target.is_file():
@@ -351,7 +554,7 @@ def format_and_append_bibtex(raw_bib, citekey, pdf_path, bib_file):
         f.write(f"\n{formatted}\n")
 
 def create_initial_note(citekey, title, author, year, notes_dir):
-    """Crea la plantilla de nota bibliogràfica a ~/Documents/notes/@citekey.md si no existeix."""
+    """Crea una nota inicial en Markdown per a l'article si no existeix."""
     notes_dir.mkdir(parents=True, exist_ok=True)
     note_path = notes_dir / f"@{citekey}.md"
     if note_path.is_file():
@@ -371,27 +574,96 @@ tags: []
 """
     note_path.write_text(note_content, encoding="utf-8")
 
-def main():
-    # 1. Obtenir text d'entrada (argument o portapapers)
-    raw_input = " ".join(sys.argv[1:]).strip()
-    if not raw_input:
-        raw_input = get_clipboard_text()
+def process_paper_by_doi(doi, direct_pdf=None):
+    """Processa un article a partir del seu DOI canònic."""
+    notify("Biblioteca", f"🔍 Processant article...\nDOI: {doi}")
+    print(f"🔍 Obtenint metadades de Crossref per a: {doi}...")
+    
+    try:
+        raw_bib = fetch_bibtex_from_doi(doi)
+    except Exception as e:
+        msg = f"❌ Error obtenint dades de Crossref per a {doi}: {e}"
+        notify("Biblioteca", msg, "critical")
+        print(msg, file=sys.stderr)
+        return False
         
+    author = extract_field("author", raw_bib)
+    title = extract_field("title", raw_bib)
+    year = extract_field("year", raw_bib)
+    citekey = generate_citekey(author, title, year)
+    
+    if key_exists_in_bib(citekey, BIB_FILE):
+        msg = f"ℹ️ L'article ja existeix a la biblioteca: @{citekey}"
+        notify("Biblioteca", msg)
+        print(msg)
+        return True
+        
+    target_pdf = PDF_DIR / f"{citekey}.pdf"
+    pdf_saved = False
+    if target_pdf.is_file():
+        pdf_saved = True
+    else:
+        print("📄 Cercant PDF en accés obert...")
+        # 1. Enllaç directe si s'ha proporcionat (p. ex. Dialnet o OpenAlex oa_url)
+        if direct_pdf:
+            print(f"⬇️ Provant enllaç directe ({direct_pdf[:65]}...)...")
+            pdf_saved = download_pdf(direct_pdf, target_pdf)
+            
+        # 2. Resolució i scraping directe de la pàgina web del DOI (com fa KBibTeX)
+        if not pdf_saved:
+            doi_url = f"https://doi.org/{doi}"
+            print(f"⬇️ Provant resolució de pàgina DOI ({doi_url})...")
+            pdf_saved = download_pdf(doi_url, target_pdf)
+            
+        # 3. Consulta a la base de dades Unpaywall
+        if not pdf_saved:
+            unpaywall_url = find_pdf_url(doi)
+            if unpaywall_url:
+                print(f"⬇️ Provant Unpaywall ({unpaywall_url[:65]}...)...")
+                pdf_saved = download_pdf(unpaywall_url, target_pdf)
+            
+    format_and_append_bibtex(raw_bib, citekey, target_pdf, BIB_FILE)
+    create_initial_note(citekey, title, author, year, NOTES_DIR)
+    
+    if pdf_saved:
+        pdf_status = "📄 PDF desat"
+    else:
+        if not is_eduvpn_active():
+            pdf_status = "⚠️ Sense PDF lliure (Connecta EduVPN UV)"
+            print("\n💡 Avís EduVPN: L'article no disposa de PDF en accés obert.")
+            print("   Si tens accés institucional a través de la Universitat de València:")
+            print("   1. Connecta la VPN:  nmcli con up eduvpn")
+            print("   2. Torna a intentar-ho o executa: add-paper --vpn <DOI>")
+        else:
+            pdf_status = "⚠️ Sense PDF (de pagament o no disponible a la subscripció)"
+
+    short_title = clean_latex(title)
+    if len(short_title) > 60:
+        short_title = short_title[:57] + "..."
+        
+    notify(
+        f"📚 Article afegit: @{citekey}",
+        f"{short_title}\n{pdf_status} | 📝 Nota creada"
+    )
+    print(f"✅ Article afegit amb èxit: @{citekey}")
+    print(f"   Títol: {short_title}")
+    print(f"   Estat PDF: {pdf_status}")
+    print(f"   Nota: ~/Documents/notes/@{citekey}.md")
+    return True
+
+def process_paper_input(raw_input):
+    """Processa qualsevol entrada: URL, DOI, Dialnet, cerca de text o dades estructurades."""
     raw_input = unquote(raw_input).strip()
-    if not raw_input:
-        notify("Biblioteca", "⚠️ No s'ha trobat cap text, DOI o URL al portapapers", "critical")
-        sys.exit(1)
-        
-    # Netejar prefix de protocol bibtex:// si n'hi ha
     raw_input = re.sub(r'^(?:bibtex|bib):\/?\/?', '', raw_input, flags=re.IGNORECASE).strip()
     
-    # 2. Comprovar si rebem dades estructurades directes del navegador (Dialnet, etc.)
+    # Dades estructurades directes del navegador (marcador o extensió)
     if raw_input.startswith("data:"):
         data_json = raw_input[5:]
         try:
             meta = json.loads(data_json)
         except Exception as e:
             notify("Biblioteca", f"⚠️ Dades mal formades: {e}", "critical")
+            print(f"⚠️ Dades mal formades: {e}", file=sys.stderr)
             sys.exit(1)
             
         title = meta.get("title", "")
@@ -400,8 +672,8 @@ def main():
         pdf_url = meta.get("pdf_url", "")
         
         notify("Biblioteca", f"🔍 Processant article...\n{title[:50]}...")
+        print(f"🔍 Processant dades estructurades: {title[:60]}...")
         
-        # Comprovar si OpenAlex té un DOI o PDF millor per a aquest títol
         oa_work = search_openalex(title)
         doi = None
         if oa_work:
@@ -411,7 +683,6 @@ def main():
             if not pdf_url and oa_work.get("open_access", {}).get("oa_url"):
                 pdf_url = oa_work["open_access"]["oa_url"]
                 
-        # Si hem trobat DOI a OpenAlex, recuperem BibTeX oficial
         raw_bib = None
         if doi:
             try:
@@ -419,13 +690,13 @@ def main():
             except Exception:
                 pass
                 
-        # Clau de citació
         first_author = authors[0] if authors else "Desconegut"
         citekey = generate_citekey(first_author, title, year)
         
         if key_exists_in_bib(citekey, BIB_FILE):
             notify("Biblioteca", f"ℹ️ L'article ja existeix a la biblioteca:\n@{citekey}")
-            sys.exit(0)
+            print(f"ℹ️ L'article ja existeix a la biblioteca: @{citekey}")
+            return
             
         target_pdf = PDF_DIR / f"{citekey}.pdf"
         pdf_saved = False
@@ -442,16 +713,43 @@ def main():
                 f.write(f"\n{bib_entry}\n")
                 
         create_initial_note(citekey, title, authors, year, NOTES_DIR)
-        
         pdf_status = "📄 PDF desat" if pdf_saved else "⚠️ Sense PDF automàtic"
         notify(f"📚 Article afegit: @{citekey}", f"{clean_latex(title)[:55]}...\n{pdf_status} | 📝 Nota creada")
+        print(f"✅ Article afegit: @{citekey} ({pdf_status})")
         return
 
-    # 3. Mode normal: Resoldre DOI o arXiv
+    # Comprovació Dialnet específica
+    if "dialnet" in raw_input.lower() or "codigo=" in raw_input.lower():
+        print("🔍 Detectat enllaç de Dialnet, resolent metadades...")
+        doi, direct_pdf, dialnet_title, meta = resolve_dialnet(raw_input)
+        if doi:
+            print(f"✅ DOI trobat a Dialnet/OpenAlex: {doi}")
+            process_paper_by_doi(doi, direct_pdf=direct_pdf)
+            return
+        elif meta.get("title"):
+            first_author = meta.get("authors", ["Desconegut"])[0] if meta.get("authors") else "Desconegut"
+            citekey = generate_citekey(first_author, meta["title"], meta.get("year", ""))
+            target_pdf = PDF_DIR / f"{citekey}.pdf"
+            pdf_saved = False
+            if target_pdf.is_file():
+                pdf_saved = True
+            elif direct_pdf:
+                pdf_saved = download_pdf(direct_pdf, target_pdf)
+            bib_entry = build_bibtex_from_dict(citekey, meta, target_pdf)
+            with open(BIB_FILE, "a", encoding="utf-8") as f:
+                f.write(f"\n{bib_entry}\n")
+            create_initial_note(citekey, meta["title"], meta.get("authors", []), meta.get("year", ""), NOTES_DIR)
+            pdf_status = "📄 PDF desat" if pdf_saved else "⚠️ Sense PDF automàtic"
+            notify(f"📚 Article Dialnet afegit: @{citekey}", f"{clean_latex(meta['title'])[:55]}...\n{pdf_status} | 📝 Nota creada")
+            print(f"✅ Article Dialnet afegit: @{citekey} ({pdf_status})")
+            return
+
+    # Resolució general de DOI o arXiv
     doi, direct_pdf = resolve_doi_or_arxiv(raw_input)
     
     # Si no hem trobat DOI directe, intentem cercar el text a OpenAlex
     if not doi and not raw_input.startswith("http"):
+        print(f"🔍 Cercant '{raw_input[:50]}' a OpenAlex...")
         oa_work = search_openalex(raw_input)
         if oa_work and oa_work.get("doi"):
             doi = oa_work["doi"].replace("https://doi.org/", "").strip()
@@ -460,54 +758,133 @@ def main():
                 
     if not doi:
         notify("Biblioteca", f"⚠️ No s'ha pogut reconèixer cap DOI ni a OpenAlex:\n{raw_input[:60]}...", "critical")
+        print(f"⚠️ No s'ha pogut reconèixer cap DOI ni a OpenAlex per a: {raw_input}", file=sys.stderr)
         sys.exit(1)
         
-    notify("Biblioteca", f"🔍 Processant article...\nDOI: {doi}")
-    
-    # 4. Obtenir BibTeX des de Crossref
-    try:
-        raw_bib = fetch_bibtex_from_doi(doi)
-    except Exception as e:
-        notify("Biblioteca", f"❌ Error obtenint dades de Crossref per a {doi}: {e}", "critical")
-        sys.exit(1)
-        
-    # 5. Extreure metadades i generar citekey
-    author = extract_field("author", raw_bib)
-    title = extract_field("title", raw_bib)
-    year = extract_field("year", raw_bib)
-    citekey = generate_citekey(author, title, year)
-    
-    # 6. Comprovar duplicats
-    if key_exists_in_bib(citekey, BIB_FILE):
-        notify("Biblioteca", f"ℹ️ L'article ja existeix a la biblioteca:\n@{citekey}")
-        sys.exit(0)
-        
-    # 7. Descarregar PDF
-    target_pdf = PDF_DIR / f"{citekey}.pdf"
-    pdf_saved = False
-    if target_pdf.is_file():
-        pdf_saved = True
-    else:
-        pdf_url = find_pdf_url(doi, direct_pdf)
-        if pdf_url:
-            pdf_saved = download_pdf(pdf_url, target_pdf)
+    process_paper_by_doi(doi, direct_pdf=direct_pdf)
+
+def interactive_search(initial_query=""):
+    """Mode interactiu: cerca a OpenAlex / Crossref i permet a l'usuari triar l'article a afegir."""
+    query = initial_query.strip()
+    if not query:
+        try:
+            query = input("🔍 Introdueix termes de cerca (títol, paraules clau, autor): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nOperació cancel·lada.")
+            return
             
-    # 8. Desar entrada a biblioteca.bib
-    format_and_append_bibtex(raw_bib, citekey, target_pdf, BIB_FILE)
-    
-    # 9. Crear nota inicial
-    create_initial_note(citekey, title, author, year, NOTES_DIR)
-    
-    # 10. Notificació d'èxit
-    pdf_status = "📄 PDF desat" if pdf_saved else "⚠️ Sense PDF (de pagament o privat)"
-    short_title = clean_latex(title)
-    if len(short_title) > 60:
-        short_title = short_title[:57] + "..."
+    if not query:
+        print("Cerca buida. Eixint.")
+        return
+
+    print(f"\n🔍 Cercant a OpenAlex: \"{query}\"...")
+    results = search_openalex_list(query, limit=5)
+    if not results:
+        print("Sense resultats a OpenAlex, provant Crossref...")
+        results = search_crossref_list(query, limit=5)
         
-    notify(
-        f"📚 Article afegit: @{citekey}",
-        f"{short_title}\n{pdf_status} | 📝 Nota creada"
-    )
+    if not results:
+        print("❌ No s'ha trobat cap article amb aquests termes.")
+        return
+
+    print("\n" + "=" * 76)
+    print(f"📚 Resultats de la cerca per a: \"{query}\"")
+    print("=" * 76)
+    for idx, item in enumerate(results, 1):
+        year_str = f"({item['year']}) " if item.get('year') else ""
+        authors = item.get("authors", [])
+        if len(authors) > 2:
+            author_str = f"{authors[0]} et al."
+        elif authors:
+            author_str = ", ".join(authors)
+        else:
+            author_str = "Autor desconegut"
+            
+        oa_badge = "🟢 Accés Obert" if item.get("is_oa") else "🔒 Sense OA directe"
+        doi_str = f"DOI: {item['doi']}" if item.get('doi') else "Sense DOI registrat"
+        
+        print(f"[{idx}] {year_str}{author_str}")
+        print(f"    Títol: {clean_latex(item['title'])}")
+        print(f"    {doi_str} | {oa_badge}")
+        print()
+    print("[q] Cancel·lar i eixir")
+    print("=" * 76)
+    
+    while True:
+        try:
+            choice = input(f"Selecciona un article [1-{len(results)}] (o 'q' per eixir): ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            print("\nCancel·lat.")
+            return
+            
+        if choice in ("q", "quit", "exit", ""):
+            print("Operació cancel·lada.")
+            return
+        if choice.isdigit() and 1 <= int(choice) <= len(results):
+            selected = results[int(choice) - 1]
+            break
+        print(f"Opció no vàlida. Introdueix un número entre 1 i {len(results)}.")
+
+    print(f"\n🚀 Processant selecció: {clean_latex(selected['title'])[:60]}...")
+    doi = selected.get("doi")
+    direct_pdf = selected.get("oa_url")
+    if doi:
+        process_paper_by_doi(doi, direct_pdf=direct_pdf)
+    else:
+        process_paper_input(selected["title"])
+
+def print_help():
+    """Mostra l'ajuda de la línia d'ordres."""
+    print("""Ús: add-paper [OPCIONS] [DOI | ARXIV | URL | TÍTOL]
+
+Afegeix articles a la biblioteca BibTeX (~/Documents/Biblioteca/biblioteca.bib),
+descarrega el PDF automàticament a pdfs/ i en crea la nota Markdown a notes/@citekey.md.
+
+Opcions:
+  -s, --search [TERMES]   Cerca interactiva a OpenAlex / Crossref
+  --vpn                   Connecta automàticament a EduVPN UV abans de la descàrrega
+  -h, --help              Mostra aquesta ajuda
+
+Exemples:
+  add-paper 10.1016/j.compedu.2023.104845
+  add-paper --vpn 10.1016/j.compedu.2023.104845
+  add-paper https://arxiv.org/abs/2301.00001
+  add-paper https://dialnet.unirioja.es/servlet/articulo?codigo=6327318
+  add-paper -s "pensamiento computacional en primaria"
+  add-paper               (llegeix de forma autònoma el portapapers Wayland/X11)
+""")
+
+def main():
+    # Comprovar arguments
+    args = sys.argv[1:]
+    
+    if any(a in ("-h", "--help") for a in args):
+        print_help()
+        sys.exit(0)
+
+    if "--vpn" in args:
+        args.remove("--vpn")
+        if not is_eduvpn_active():
+            connect_eduvpn()
+
+    if args and args[0] in ("-s", "--search"):
+        query = " ".join(args[1:]).strip()
+        interactive_search(query)
+        sys.exit(0)
+
+    # 1. Obtenir text d'entrada (argument o portapapers)
+    raw_input = " ".join(args).strip()
+    if not raw_input:
+        raw_input = get_clipboard_text()
+        
+    raw_input = unquote(raw_input).strip()
+    if not raw_input:
+        notify("Biblioteca", "⚠️ No s'ha trobat cap text, DOI o URL al portapapers", "critical")
+        print("⚠️ No s'ha trobat cap text, DOI o URL com a argument ni al portapapers.", file=sys.stderr)
+        print("Executa 'add-paper --help' o 'add-paper -s [termes]' per cercar interactivament.", file=sys.stderr)
+        sys.exit(1)
+        
+    process_paper_input(raw_input)
 
 if __name__ == "__main__":
     main()

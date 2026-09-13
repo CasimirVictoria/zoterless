@@ -52,6 +52,23 @@ def notify(title, message, urgency="normal"):
     except Exception:
         pass
 
+def is_eduvpn_active():
+    """Comprova si la connexió WireGuard / VPN de la universitat (EduVPN) està activa."""
+    try:
+        res = subprocess.run(
+            ["nmcli", "-t", "-f", "NAME", "con", "show", "--active"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                if "eduvpn" in line.strip().lower():
+                    return True
+    except Exception:
+        pass
+    return False
+
 def strip_accents(text):
     """Translitera caràcters accentuats a caràcters ASCII equivalents (ex: á -> a, ñ -> n)."""
     if not text:
@@ -274,7 +291,7 @@ def download_pdf_with_curl(pdf_url, target_path):
     target_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         cmd = [
-            "curl", "-sL", "--max-time", "35",
+            "curl", "-skL", "--max-time", "35",
             "-A", HEADERS["User-Agent"],
             "-o", str(temp_target),
             pdf_url
@@ -290,7 +307,7 @@ def download_pdf_with_curl(pdf_url, target_path):
             candidates = scrape_pdf_links_from_html(html, pdf_url)
             for cand in candidates:
                 cmd2 = [
-                    "curl", "-sL", "--max-time", "35",
+                    "curl", "-skL", "--max-time", "35",
                     "-A", HEADERS["User-Agent"],
                     "-o", str(temp_target),
                     cand
@@ -651,7 +668,14 @@ tags: []
         note_path.write_text(note_content, encoding="utf-8")
 
     # 8. Notificació d'èxit
-    pdf_status = "📄 PDF desat" if pdf_saved else "⚠️ Sense PDF"
+    if pdf_saved:
+        pdf_status = "📄 PDF desat"
+    else:
+        if not is_eduvpn_active():
+            pdf_status = "⚠️ Sense PDF lliure (Connecta EduVPN UV per a accés institucional)"
+        else:
+            pdf_status = "⚠️ Sense PDF (de pagament o privat)"
+
     short_title = clean_latex(title)
     if len(short_title) > 60:
         short_title = short_title[:57] + "..."

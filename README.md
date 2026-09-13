@@ -154,13 +154,29 @@ Per a una experiència de recerca fluida a KDE Plasma:
 
 ## 🛠️ Eines Addicionals
 
-- **`add-paper`**: Permet afegir articles directament des del terminal o el portapapers (Wayland/X11):
-  ```bash
-  add-paper 10.18172/con.6302
-  add-paper https://arxiv.org/abs/2301.00001
-  # O sense arguments per llegir un DOI copiat al portapapers:
-  add-paper
-  ```
+### `add-paper`: Gestor CLI i Cerca Interactiva
+Permet afegir articles i cercar literatura acadèmica directament des del terminal o el portapapers (Wayland/X11):
+
+```bash
+# 1. Cerca interactiva a OpenAlex / Crossref amb selecció numèrica:
+add-paper -s "pensament computacional en primaria"
+
+# 2. Afegir directament per DOI, arXiv o URL de repositori (Dialnet, RODERIC, RiuNet, etc.):
+add-paper 10.18172/con.6302
+add-paper https://arxiv.org/abs/2301.00001
+add-paper https://dialnet.unirioja.es/servlet/articulo?codigo=6327318
+
+# 3. Connectar automàticament a EduVPN UV abans de la descàrrega per a articles de pagament:
+add-paper --vpn 10.1016/j.compedu.2023.104845
+
+# 4. Mode autònom des del portapapers (llegeix automàticament el text copiat):
+add-paper
+```
+
+### 🔒 Detecció Institucional d'EduVPN
+Quan un article pertany a una editorial sota subscripció (ScienceDirect, Springer, Wiley, IEEE, etc.) i no té PDF lliure en accés obert, `zoterless` comprova l'estat d'EduVPN (`nmcli`):
+- Si la VPN institucional no està activa, envia una notificació suggerint connectar-la (`nmcli con up eduvpn`).
+- Suporta descàrrega directa a través del túnel VPN WireGuard un cop connectat.
 
 ---
 
