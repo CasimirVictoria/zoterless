@@ -226,8 +226,36 @@ def find_unpaywall_pdf(doi):
         print(f"Unpaywall error: {e}", file=sys.stderr)
     return None
 
+def scrape_pdf_links_from_html(html, base_url):
+    """Extreu enllaços de descàrrega de PDF a partir de l'HTML (estil KBibTeX / Highwire / OJS)."""
+    candidates = []
+    # 1. Metadades acadèmiques estàndard (Highwire Press, Dublin Core, Eprints, Google Scholar)
+    for m in re.finditer(r'<meta\s+name=["\'](?:citation_pdf_url|dc\.identifier|eprints\.document_url)["\']\s+content=["\']([^"\']+)["\']', html, re.I):
+        candidates.append(m.group(1))
+    for m in re.finditer(r'<meta\s+content=["\']([^"\']+)["\']\s+name=["\'](?:citation_pdf_url|dc\.identifier|eprints\.document_url)["\']', html, re.I):
+        candidates.append(m.group(1))
+    # 2. OJS PDF.js viewer variable (var pdfUrl = "...")
+    for m in re.finditer(r'pdfUrl\s*=\s*["\']([^"\']+)["\']', html, re.I):
+        cand = m.group(1).replace(r"\/", "/")
+        candidates.append(cand)
+    # 3. Enllaços OJS /article/download/
+    for m in re.finditer(r'href=["\']([^"\']+/article/download/[^"\']+)["\']', html, re.I):
+        candidates.append(m.group(1))
+    # 4. Enllaços directes a fitxers .pdf
+    for m in re.finditer(r'href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', html, re.I):
+        candidates.append(m.group(1))
+        
+    resolved = []
+    for c in candidates:
+        full_url = urljoin(base_url, c.strip())
+        if full_url not in resolved:
+            resolved.append(full_url)
+    return resolved
+
 def download_pdf_with_curl(pdf_url, target_path):
-    """Descarrega el fitxer PDF amb curl seguint redireccions i enllaços interns OJS/Dialnet."""
+    """Descarrega el fitxer PDF amb curl seguint redireccions i enllaços interns OJS/Dialnet/KBibTeX."""
+    if not pdf_url:
+        return False
     temp_target = target_path.with_suffix(".tmp")
     target_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -243,22 +271,15 @@ def download_pdf_with_curl(pdf_url, target_path):
             if data.startswith(b"%PDF"):
                 temp_target.replace(target_path)
                 return True
-            # Intentar detectar enllaç intern HTML
+            # Intentar detectar enllaç intern HTML explorant com fa KBibTeX
             html = data.decode("utf-8", errors="ignore")
-            m = re.search(r'<meta\s+name=["\']citation_pdf_url["\']\s+content=["\']([^"\']+)["\']', html, re.I)
-            if not m:
-                m = re.search(r'<meta\s+content=["\']([^"\']+)["\']\s+name=["\']citation_pdf_url["\']', html, re.I)
-            if not m:
-                m = re.search(r'href=["\']([^"\']+/article/download/[^"\']+)["\']', html, re.I)
-            if not m:
-                m = re.search(r'href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', html, re.I)
-            if m:
-                effective_pdf = urljoin(pdf_url, m.group(1))
+            candidates = scrape_pdf_links_from_html(html, pdf_url)
+            for cand in candidates:
                 cmd2 = [
                     "curl", "-sL", "--max-time", "35",
                     "-A", HEADERS["User-Agent"],
                     "-o", str(temp_target),
-                    effective_pdf
+                    cand
                 ]
                 subprocess.run(cmd2, check=False)
                 if temp_target.is_file():
@@ -269,7 +290,7 @@ def download_pdf_with_curl(pdf_url, target_path):
         if temp_target.is_file():
             temp_target.unlink()
     except Exception as e:
-        print(f"Error descarregant PDF: {e}", file=sys.stderr)
+        print(f"Error descarregant PDF de {pdf_url}: {e}", file=sys.stderr)
     return False
 
 def find_recent_matching_pdf(citekey, title, first_author, doi, max_age_seconds=1800):
@@ -487,11 +508,11 @@ def process_zotero_item(item):
     target_pdf = PDF_DIR / f"{citekey}.pdf"
     pdf_saved = False
 
-    # 5. Adquisició del PDF
+    # 5. Adquisició del PDF (Estratègia multicanal estil KBibTeX)
     if target_pdf.is_file():
         pdf_saved = True
     elif local_source_pdf and local_source_pdf.is_file():
-        # Cas fitxer local ja obert
+        # Cas fitxer local ja obert a Firefox (file:///)
         try:
             PDF_DIR.mkdir(parents=True, exist_ok=True)
             import shutil
@@ -500,7 +521,7 @@ def process_zotero_item(item):
         except Exception as e:
             print(f"Error copiant fitxer local: {e}", file=sys.stderr)
 
-    # 5a. Adjunts de Zotero
+    # 5a. Adjunts enviats per Zotero Connector
     if not pdf_saved:
         attachments = item.get("attachments", [])
         for att in attachments:
@@ -518,15 +539,50 @@ def process_zotero_item(item):
                 if download_pdf_with_curl(att_url, target_pdf):
                     pdf_saved = True
                     break
+            elif att_url.startswith("http"):
+                if download_pdf_with_curl(att_url, target_pdf):
+                    pdf_saved = True
+                    break
 
-    # 5b. Unpaywall (Open Access directe)
+    # 5b. La pàgina web on es troba l'usuari a Firefox (item_url)
+    if not pdf_saved and item_url and item_url.startswith("http"):
+        # Si és una revista OJS (/article/view/), provar directament la transformació a /article/download/
+        if "/article/view/" in item_url:
+            ojs_dl = item_url.replace("/article/view/", "/article/download/")
+            if download_pdf_with_curl(ojs_dl, target_pdf):
+                pdf_saved = True
+        # Provar scraping de la pàgina web (on està l'etiqueta citation_pdf_url com a KBibTeX)
+        if not pdf_saved:
+            if download_pdf_with_curl(item_url, target_pdf):
+                pdf_saved = True
+
+    # 5c. Resolució directa del DOI (molts DOIs en accés obert com Eureka redirigeixen al PDF!)
+    if not pdf_saved and doi:
+        doi_url = f"https://doi.org/{doi}"
+        if download_pdf_with_curl(doi_url, target_pdf):
+            pdf_saved = True
+
+    # 5d. Unpaywall (Open Access directe)
     if not pdf_saved and doi:
         unpaywall_url = find_unpaywall_pdf(doi)
         if unpaywall_url:
             if download_pdf_with_curl(unpaywall_url, target_pdf):
                 pdf_saved = True
 
-    # 5c. Detecció a ~/Downloads (per si l'usuari ha baixat o obert el PDF abans o manualment)
+    # 5e. OpenAlex (Open Access alternatiu)
+    if not pdf_saved and doi:
+        try:
+            oa_url = f"https://api.openalex.org/works/https://doi.org/{doi}"
+            req = Request(oa_url, headers=HEADERS)
+            with urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                pdf_oa = data.get("open_access", {}).get("oa_url") or data.get("primary_location", {}).get("pdf_url")
+                if pdf_oa and download_pdf_with_curl(pdf_oa, target_pdf):
+                    pdf_saved = True
+        except Exception:
+            pass
+
+    # 5f. Detecció a ~/Downloads (per si l'usuari l'ha baixat abans o manualment)
     if not pdf_saved:
         matched_download = find_recent_matching_pdf(citekey, title, first_author_lastname, doi)
         if matched_download and matched_download.is_file():
