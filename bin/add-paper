@@ -261,16 +261,83 @@ def normalize_title(t):
     clean = strip_accents(clean_latex(t)).lower()
     return re.sub(r'[^a-z0-9]', '', clean)
 
+def expand_query_multilingual(query):
+    """Tradueix localment la consulta a l'anglès (per a bases internacionals) i al castellà (per a Dialnet) amb Argos Translate."""
+    queries = {"original": query, "en": query, "es": query}
+    try:
+        import contextlib
+        import io
+        import logging
+        import warnings
+        os.environ["STANZA_LOGGING_LEVEL"] = "ERROR"
+        logging.getLogger("argostranslate").setLevel(logging.ERROR)
+        warnings.filterwarnings("ignore")
+
+        sink = io.StringIO()
+        with contextlib.redirect_stderr(sink):
+            import argostranslate.translate
+            
+            langs = {l.code: l for l in argostranslate.translate.get_installed_languages()}
+            ca, en, es = langs.get("ca"), langs.get("en"), langs.get("es")
+            
+            q_lower = f" {query.lower().strip()} "
+            is_ca = any(w in q_lower for w in [" l'", " d'", " els ", " les ", " dels ", " amb ", " i ", " per ", " educacio ", " primaria ", " pensament ", " fisica ", " ciencia "]) or any(c in query for c in "àèéíòóúç·")
+            is_en = any(w in q_lower for w in [" the ", " in ", " of ", " and ", " for ", " to ", " with ", " on ", " learning ", " school ", " education ", " thinking "])
+            
+            if is_ca and ca and en and es:
+                tr_ca_en = ca.get_translation(en)
+                if tr_ca_en:
+                    en_trans = tr_ca_en.translate(query)
+                    queries["en"] = en_trans.strip()
+                    tr_en_es = en.get_translation(es)
+                    if tr_en_es:
+                        queries["es"] = tr_en_es.translate(en_trans).strip()
+            elif not is_en and es and en:
+                tr_es_en = es.get_translation(en)
+                if tr_es_en:
+                    queries["en"] = tr_es_en.translate(query).strip()
+                    queries["es"] = query.strip()
+            elif is_en and en and es:
+                tr_en_es = en.get_translation(es)
+                if tr_en_es:
+                    queries["es"] = tr_en_es.translate(query).strip()
+                    queries["en"] = query.strip()
+    except Exception:
+        pass
+    return queries
+
 def federated_search(query, limit_per_source=5):
-    """Cerca en paral·lel a OpenAlex, ERIC, Crossref i Dialnet amb fusió i deduplicació intel·ligent."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        f_oa = executor.submit(search_openalex_list, query, limit_per_source)
-        f_er = executor.submit(search_eric_list, query, limit_per_source)
-        f_cr = executor.submit(search_crossref_list, query, limit_per_source)
-        f_dn = executor.submit(search_dialnet_list, query, limit_per_source)
+    """Cerca en paral·lel a OpenAlex, ERIC, Crossref i Dialnet traduint automàticament amb Argos Translate."""
+    multilingual = expand_query_multilingual(query)
+    q_orig = multilingual["original"]
+    q_en = multilingual["en"]
+    q_es = multilingual["es"]
+    
+    if q_en.lower() != q_orig.lower() or q_es.lower() != q_orig.lower():
+        print("🌐 Traducció automàtica local (Argos Translate):")
+        if q_en.lower() != q_orig.lower():
+            print(f"   🇬🇧 Anglès (ERIC, OpenAlex, Crossref): \"{q_en}\"")
+        if q_es.lower() != q_orig.lower():
+            print(f"   🇪🇸 Castellà (Dialnet): \"{q_es}\"")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        futures = []
+        # 1. Bases internacionals amb la versió anglesa
+        futures.append(executor.submit(search_openalex_list, q_en, limit_per_source))
+        futures.append(executor.submit(search_eric_list, q_en, limit_per_source))
+        futures.append(executor.submit(search_crossref_list, q_en, limit_per_source))
+        
+        # 2. Si la consulta original era en català/castellà, consultar també OpenAlex per a articles locals
+        if q_en.lower() != q_orig.lower():
+            futures.append(executor.submit(search_openalex_list, q_orig, limit_per_source))
+            
+        # 3. Dialnet amb la versió castellana i original
+        futures.append(executor.submit(search_dialnet_list, q_es, limit_per_source))
+        if q_orig.lower() != q_es.lower():
+            futures.append(executor.submit(search_dialnet_list, q_orig, limit_per_source))
         
         all_items = []
-        for f in [f_oa, f_er, f_cr, f_dn]:
+        for f in futures:
             try:
                 res = f.result(timeout=6)
                 if res:

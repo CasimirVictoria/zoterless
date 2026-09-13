@@ -154,12 +154,14 @@ Per a una experiència de recerca fluida a KDE Plasma:
 
 ## 🛠️ Eines Addicionals
 
-### `add-paper`: Gestor CLI i Cerca Interactiva
+### `add-paper`: Gestor CLI i Cerca Federada Multilingüe
 Permet afegir articles i cercar literatura acadèmica directament des del terminal o el portapapers (Wayland/X11):
 
 ```bash
-# 1. Cerca interactiva a OpenAlex / Crossref amb selecció numèrica:
-add-paper -s "pensament computacional en primaria"
+# 1. Cerca federada multilingüe (OpenAlex, ERIC, Crossref, Dialnet) amb Argos Translate:
+#    Tradueix localment català -> anglès (ERIC, OpenAlex, Crossref) i castellà (Dialnet),
+#    executa cerques en paral·lel, deduplica resultats i mostra fonts combinades:
+add-paper -s "pensament computacional a primària"
 
 # 2. Afegir directament per DOI, arXiv o URL de repositori (Dialnet, RODERIC, RiuNet, etc.):
 add-paper 10.18172/con.6302
