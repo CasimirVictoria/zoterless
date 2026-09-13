@@ -5,11 +5,27 @@
 
 ---
 
-## 🎯 Per què zoterless?
+## 🎯 La Filosofia: Les 4 Peces Essencials en un Sol Dimoni
 
-La majoria d'investigadors i acadèmics que utilitzen fitxers plans (LaTeX, Markdown, Quarto, Typst) pateixen una paradoxa: per alimentar un simple fitxer `.bib` i una carpeta de PDFs han de mantindre oberta una aplicació feixuga de més de **500 MB de RAM** (Zotero Desktop, construït sobre el motor Gecko/Firefox) amb una pila d'extensions fràgils que sovint es desincronitzen o es trenquen amb les actualitzacions.
+La majoria d'investigadors i acadèmics que treballem amb fitxers plans (LaTeX, Markdown, Quarto, Typst) hem acabat configurant al llarg dels anys una pila de treball molt concreta i potent al voltant de l'ecosistema Zotero:
 
-**zoterless** elimina completament Zotero Desktop, la base de dades SQLite i els connectors intermediaris, substituint-los per un dimoni natiu ultralleuger en Python (~24 MB) que escolta directament les peticions de l'extensió oficial **Zotero Connector** de Firefox i escriu **directament als teus fitxers plans**.
+1. **Zotero Connector:** La millor extensió de navegador del món acadèmic per capturar articles científics, tesis i llibres en un sol clic des de revistes, catàlegs o PDFs en línia. *(És una eina imprescindible i la continuem emprant exactament igual).*
+2. **Better BibTeX (BBT):** El plugin clau per generar citekeys canòniques i predictibles (estil `autorTitolAny`) i mantindre sincronitzat un fitxer `.bib`.
+3. **ZotMoov (o ZotFile):** El plugin imprescindible per extreure els fitxers de la base de dades interna, reanomenar automàticament els PDFs amb la citekey estàndard i moure'ls a la nostra carpeta de documents.
+4. **Better Notes (Exportació Markdown):** El plugin per generar automàticament una plantilla de notes estructurada en Markdown amb metadades YAML i enllaços per a cada nova referència.
+
+### 💥 La Paradoxa de la Pila Clàssica
+Per gaudir d'aquestes 4 funcionalitats essencials, estàvem obligats a:
+- Mantindre oberta permanentment una aplicació feixuga de més de **500 MB de RAM** (Zotero Desktop, construït sobre el motor Gecko/Firefox i una base de dades SQLite opaca).
+- Configurar i mantindre **3 extensions de tercers en JavaScript**, que sovint es desincronitzen o es trenquen amb cada actualització major de Zotero (com va passar dolorosament amb el salt a Zotero 7).
+
+### ⚡ La Solució `zoterless`
+**`zoterless` aglutina i fon aquestes 4 peces en un sol dimoni autònom de ~24 MB en Python pur**, sense dependències opaques:
+
+- **100% Compatible amb Zotero Connector:** Continuem fent clic a la icona oficial del navegador a Firefox. L'extensió envia la petició HTTP al port local `23119`, i `zotero-receiver` li respon amb el protocol natiu de Zotero.
+- **Better BibTeX natiu:** Resolució de metadades canòniques via Crossref/DOI i escriptura directa a `~/Documents/Biblioteca/biblioteca.bib`.
+- **ZotMoov natiu:** Descàrrega directa de PDFs en accés obert (Unpaywall, Dialnet, DSpace) o escaneig automàtic a `~/Downloads`, reanomenant a `{citekey}.pdf` a la carpeta `pdfs/`.
+- **Better Notes natiu:** Creació immediata de la fitxa de recerca en Markdown amb frontmatter YAML a `~/Documents/notes/@{citekey}.md`.
 
 ---
 
@@ -17,10 +33,11 @@ La majoria d'investigadors i acadèmics que utilitzen fitxers plans (LaTeX, Mark
 
 | La pila pesada anterior | L'alternativa zoterless | Què fa exactament? |
 | :--- | :--- | :--- |
-| **Zotero Desktop** *(~500 MB RAM, SQLite, Gecko)* | **`zotero-receiver`** *(~24 MB RAM, 0% CPU)* | Emula el servidor local de Zotero al port `23119` per a **Zotero Connector**. |
-| **Plugin Better BibTeX** *(motor JS intern)* | **Natiu a `zotero-receiver`** | Resolució canònica via Crossref/DOI i escriptura directa a `biblioteca.bib`. |
-| **Plugins ZotMoov / ZotFile** *(reanomenar PDFs)* | **Natiu a `zotero-receiver`** | Descàrrega directa d'Unpaywall o detecció automàtica a `~/Downloads`. |
-| **Plugins Better Notes / Markdown** | **Natiu a `zotero-receiver`** | Creació immediata de la plantilla de notes a `notes/@{citekey}.md`. |
+| **Zotero Connector** *(extensió navegador)* | **Zotero Connector** *(el mantenim!)* | Captura de metadades i PDFs al navegador en un sol clic. |
+| **Zotero Desktop** *(~500 MB RAM, SQLite, Gecko)* | **`zotero-receiver`** *(~24 MB RAM, 0% CPU)* | Servidor HTTP natiu en Python al port `23119` que atén el Connector. |
+| **Plugin Better BibTeX** *(motor JS intern)* | **Natiu a `zoterless`** | Citekeys canòniques (`autorTitolAny`) i escriptura a `biblioteca.bib`. |
+| **Plugins ZotMoov / ZotFile** *(reanomenar PDFs)* | **Natiu a `zoterless`** | Descàrrega directa d'Unpaywall o detecció automàtica a `~/Downloads`. |
+| **Plugins Better Notes / Markdown** | **Natiu a `zoterless`** | Creació immediata de la plantilla de notes a `notes/@{citekey}.md`. |
 | **VS Code + Extensions Zotero** *(cercador de cites)* | **`kate-citar`** *(PyQt5 natiu per a Kate)* | Cercador instantani de referències per inserir `@citekey` al cursor. |
 | **Visor de PDFs intern de Zotero** | **`kate-citar-actions` + Okular** | Obre el PDF associat a **Okular** i la nota a **Kate** amb una drecera. |
 
