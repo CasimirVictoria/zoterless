@@ -718,7 +718,7 @@ def find_scihub_pdf(doi):
     for mirror in SCIHUB_MIRRORS:
         url = f"{mirror}/{doi}"
         try:
-            cmd = ["curl", "-skL", "--connect-timeout", "4", "--max-time", "8", "-A", HEADERS["User-Agent"], url]
+            cmd = ["curl", "-skL", "--connect-timeout", "3", "--max-time", "6", "-A", HEADERS["User-Agent"], url]
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)
             if res.returncode == 0 and res.stdout:
                 html = res.stdout
@@ -780,7 +780,7 @@ def download_pdf(pdf_url, target_path):
     target_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         cmd = [
-            "curl", "-skL", "--max-time", "30",
+            "curl", "-skL", "--connect-timeout", "4", "--max-time", "15",
             "-A", HEADERS["User-Agent"],
             "-o", str(temp_target),
             pdf_url
@@ -792,12 +792,17 @@ def download_pdf(pdf_url, target_path):
                 temp_target.replace(target_path)
                 return True
                 
-            # Si hem obtingut una pàgina HTML (com a Dialnet o visors OJS), analitzem els enllaços interns
+            # Detectar si és un bloqueig per bot challenge (com Fastly / Cloudflare)
             html = data.decode("utf-8", errors="ignore")
+            if "Client Challenge" in html or "_fs_ch_st" in html or "cf-browser-verification" in html:
+                temp_target.unlink()
+                return False
+                
+            # Si hem obtingut una pàgina HTML (com a Dialnet o visors OJS), analitzem els enllaços interns
             candidates = scrape_pdf_links_from_html(html, pdf_url)
             for cand in candidates:
                 cmd2 = [
-                    "curl", "-skL", "--max-time", "30",
+                    "curl", "-skL", "--connect-timeout", "4", "--max-time", "15",
                     "-A", HEADERS["User-Agent"],
                     "-o", str(temp_target),
                     cand

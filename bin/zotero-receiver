@@ -20,6 +20,7 @@ import re
 import socketserver
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
 from pathlib import Path
@@ -257,7 +258,7 @@ def find_scihub_pdf(doi):
     for mirror in SCIHUB_MIRRORS:
         url = f"{mirror}/{doi}"
         try:
-            cmd = ["curl", "-skL", "--connect-timeout", "4", "--max-time", "8", "-A", HEADERS["User-Agent"], url]
+            cmd = ["curl", "-skL", "--connect-timeout", "3", "--max-time", "6", "-A", HEADERS["User-Agent"], url]
             res = subprocess.run(cmd, capture_output=True, text=True, check=False)
             if res.returncode == 0 and res.stdout:
                 html = res.stdout
@@ -332,7 +333,7 @@ def download_pdf_with_curl(pdf_url, target_path):
     target_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         cmd = [
-            "curl", "-skL", "--max-time", "35",
+            "curl", "-skL", "--connect-timeout", "4", "--max-time", "15",
             "-A", HEADERS["User-Agent"],
             "-o", str(temp_target),
             pdf_url
@@ -343,12 +344,16 @@ def download_pdf_with_curl(pdf_url, target_path):
             if data.startswith(b"%PDF"):
                 temp_target.replace(target_path)
                 return True
-            # Intentar detectar enllaç intern HTML explorant com fa KBibTeX
+            # Detectar si és un bloqueig per bot challenge (com Fastly / Cloudflare)
             html = data.decode("utf-8", errors="ignore")
+            if "Client Challenge" in html or "_fs_ch_st" in html or "cf-browser-verification" in html:
+                temp_target.unlink()
+                return False
+            # Intentar detectar enllaç intern HTML explorant com fa KBibTeX
             candidates = scrape_pdf_links_from_html(html, pdf_url)
             for cand in candidates:
                 cmd2 = [
-                    "curl", "-skL", "--max-time", "35",
+                    "curl", "-skL", "--connect-timeout", "4", "--max-time", "15",
                     "-A", HEADERS["User-Agent"],
                     "-o", str(temp_target),
                     cand
@@ -782,16 +787,15 @@ class ZoteroHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if "/connector/saveItems" in self.path:
+            self.send_cors_headers(201)
+            self.wfile.write(b'{"success":true}')
             try:
                 payload = json.loads(body)
                 items = payload.get("data", {}).get("items", []) or payload.get("items", [])
                 for it in items:
-                    process_zotero_item(it)
+                    threading.Thread(target=process_zotero_item, args=(it,), daemon=True).start()
             except Exception as e:
                 print(f"Error processant saveItems: {e}", file=sys.stderr)
-                
-            self.send_cors_headers(201)
-            self.wfile.write(b'{"success":true}')
             return
 
         self.send_cors_headers(200)
@@ -801,8 +805,8 @@ class ZoteroHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 def run():
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("127.0.0.1", PORT), ZoteroHandler) as httpd:
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
+    with socketserver.ThreadingTCPServer(("127.0.0.1", PORT), ZoteroHandler) as httpd:
         print(f"📡 Servidor Zotero Receiver avançat escoltant a http://127.0.0.1:{PORT}...")
         try:
             httpd.serve_forever()
