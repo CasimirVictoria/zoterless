@@ -691,7 +691,7 @@ def scrape_pdf_links_from_html(html, base_url):
     # 8. Enllaços directes a fitxers .pdf
     for m in re.finditer(r'href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']', html, re.I):
         candidates.append(m.group(1))
-    # 9. Visors incrustats / Iframe / Embed / Object (Sci-Hub o lectors web)
+    # 9. Visors incrustats / Iframe / Embed / Object (lectors web o repositoris OA)
     for m in re.finditer(r'<(?:iframe|embed|object)\b[^>]*(?:id=["\']pdf["\']|src=["\']([^"\']+)["\']|data=["\']([^"\']+)["\'])', html, re.I):
         cand = m.group(1) or m.group(2)
         if cand:
@@ -703,42 +703,6 @@ def scrape_pdf_links_from_html(html, base_url):
         if full_url not in resolved:
             resolved.append(full_url)
     return resolved
-
-SCIHUB_MIRRORS = [
-    "https://sci-hub.ru",
-    "https://sci-hub.st",
-    "https://sci-hub.ee",
-    "https://sci-hub.se",
-]
-
-def find_scihub_pdf(doi):
-    """Cerca el PDF d'un DOI a través dels miralls de Sci-Hub (estil zotero-scipdf)."""
-    if not doi:
-        return None
-    for mirror in SCIHUB_MIRRORS:
-        url = f"{mirror}/{doi}"
-        try:
-            cmd = ["curl", "-skL", "--connect-timeout", "3", "--max-time", "6", "-A", HEADERS["User-Agent"], url]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if res.returncode == 0 and res.stdout:
-                html = res.stdout
-                # 1. Selector prioritari (#pdf src/data o embed/iframe/object)
-                m = re.search(r'<(?:iframe|embed|object)\b[^>]*(?:id=["\']pdf["\']|src=["\']([^"\']+)["\']|data=["\']([^"\']+)["\'])', html, re.I)
-                if m:
-                    src = m.group(1) or m.group(2)
-                    if src:
-                        return urljoin(mirror, src.strip())
-                # 2. Metadades citation_pdf_url
-                m_meta = re.search(r'<meta\s+name=["\']citation_pdf_url["\']\s+content=["\']([^"\']+)["\']', html, re.I)
-                if m_meta:
-                    return urljoin(mirror, m_meta.group(1).strip())
-                # 3. Enllaç directe /storage/... o .pdf
-                m_href = re.search(r'href=["\']([^"\']*(?:/storage/|/downloads/|/[^"\']+\.pdf)[^"\']*)["\']', html, re.I)
-                if m_href:
-                    return urljoin(mirror, m_href.group(1).strip())
-        except Exception:
-            continue
-    return None
 
 def find_pdf_url(doi, direct_pdf=None):
     """Localitza la URL de descàrrega directa del PDF (Unpaywall o metadades)."""
@@ -931,14 +895,6 @@ def process_paper_by_doi(doi, direct_pdf=None, abstract=None):
             if unpaywall_url:
                 print(f"⬇️ Provant Unpaywall ({unpaywall_url[:65]}...)...")
                 pdf_saved = download_pdf(unpaywall_url, target_pdf)
-
-        # 4. Resolució Sci-Hub (Custom PDF Resolver)
-        if not pdf_saved:
-            print("⬇️ Provant resolució alternativa Sci-Hub...")
-            scihub_url = find_scihub_pdf(doi)
-            if scihub_url:
-                print(f"⬇️ Descarregant de Sci-Hub ({scihub_url[:65]}...)...")
-                pdf_saved = download_pdf(scihub_url, target_pdf)
             
     format_and_append_bibtex(raw_bib, citekey, target_pdf, BIB_FILE)
     create_initial_note(citekey, title, author, year, NOTES_DIR, abstract=final_abstract, doi=doi)

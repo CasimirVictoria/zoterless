@@ -238,6 +238,16 @@ flowchart TD
 
 ---
 
+## ⚖️ Política d'Accés Obert i Resolució Externa de Documents
+
+`zoterless` està compromès de forma estricta amb la **ciència oberta (*Open Access*)** i el respecte als marcs legals i de drets d'autor:
+
+- El sistema només utilitza de forma nativa fonts públiques i legals d'accés obert: **Unpaywall API**, **OpenAlex**, **Dialnet**, **arXiv**, metadades de **Crossref** i repositoris institucionals (OJS, DSpace, RODERIC).
+- Per motius ètics, legals i de compliment de la propietat intel·lectual en diverses jurisdiccions, **aquest repositori no incorpora ni distribueix connectors ni resolutors cap a fonts no oficials com Sci-Hub**.
+- Tanmateix, gràcies a l'arquitectura oberta basada en fitxers plans estàndard (`biblioteca.bib` i carpeta `pdfs/`), qualsevol investigador pot complementar el flux creant de forma autònoma scripts externs senzills (per exemple amb `curl` o Python) per gestionar descàrregues des de les seues pròpies fonts o subscripcions institucionals i col·locar els PDFs a `pdfs/{citekey}.pdf`.
+
+---
+
 ## 🙏 Agraïments i Reconeixements
 
 Aquest projecte és un tribut sincer al programari lliure i s'alça directament sobre les espatlles dels gegants que han definit el flux de treball acadèmic modern:
