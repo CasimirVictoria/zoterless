@@ -123,10 +123,15 @@ flowchart LR
 │       ├── berzosaInteligenciaArtificialPensamiento2025.pdf
 │       └── caceresTendenciasInnovacionCurricular2026.pdf
 └── notes/
-    ├── @pont-niclosCreativityArtificialIntelligence2024.md
-    ├── @berzosaInteligenciaArtificialPensamiento2025.md
-    └── @caceresTendenciasInnovacionCurricular2026.md
+    ├── @pont-niclosCreativityArtificialIntelligence2024.md   # Nota bibliogràfica (@citekey)
+    ├── @berzosaInteligenciaArtificialPensamiento2025.md      # Nota bibliogràfica (@citekey)
+    ├── 20260920T120000--didactica-ciencies_educacio.md       # Nota pròpia (sense @)
+    └── concepte-pensament-computacional.md                   # Nota pròpia (sense @)
 ```
+
+> **🏷️ La Convenció de l'Arroba (`@`):**  
+> Les notes que comencen per `@` (`@{citekey}.md`) són **notes bibliogràfiques** (*literature notes*): fitxes associades directament a un article, llibre o PDF extern generades automàticament per `zoterless`.  
+> Les notes que **no** porten arroba són **notes pròpies o permanents** (*evergreen notes*): idees, síntesis o assajos elaborats totalment per nosaltres, que enllacen cap a la bibliografia mitjançant `[[@citekey]]` o la citació Pandoc `[@citekey, p. X]`.
 
 ---
 
