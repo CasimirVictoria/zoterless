@@ -32,6 +32,27 @@ BIB_FILE = Path.home() / "Documents/Biblioteca/biblioteca.bib"
 PDF_DIR = Path.home() / "Documents/Biblioteca/pdfs"
 NOTES_DIR = Path.home() / "Documents/notes"
 
+# --- Setup Academic Spain Unified Engine ---
+academic_dir = Path.home() / "Projects" / "mcp-server-academic-spain"
+if academic_dir.exists():
+    import glob
+    for sp in glob.glob(str(academic_dir / "venv/lib/python3.*/site-packages")):
+        if sp not in sys.path:
+            sys.path.insert(0, sp)
+    if str(academic_dir) not in sys.path:
+        sys.path.insert(0, str(academic_dir))
+
+try:
+    from platforms import (
+        search_academic_sync, resolve_identifier_sync, paper_to_bibtex,
+        expand_query_multilingual
+    )
+except ImportError:
+    search_academic_sync = None
+    resolve_identifier_sync = None
+    paper_to_bibtex = None
+    expand_query_multilingual = None
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
 }
@@ -1106,37 +1127,55 @@ def process_paper_input(raw_input, direct_pdf=None):
             print(f"✅ Article Dialnet afegit: @{citekey} ({pdf_status})")
             return
 
-    # Comprovació BOE específica
-    if "boe.es" in raw_input.lower() or "boe-" in raw_input.lower():
-        print("⚖️ Detectat document del BOE, resolent metadades oficials...")
-        boe_id, resolved_direct_pdf, boe_title, meta = resolve_boe(raw_input)
-        final_direct_pdf = direct_pdf or resolved_direct_pdf
-        if boe_id:
-            m_norma = re.search(r'(?:Real\s+Decreto|RD|Ley\s+Org[aá]nica|LO|Ley|Orden)\s*(\d+[\/_\-]\d{4}|\d+)', boe_title, re.I)
-            if m_norma:
-                clau_neta = re.sub(r'[^a-zA-Z0-9]', '', m_norma.group(0))
-                citekey = f"boe{clau_neta}"
+    # 1. Intent de resolució mitjançant el motor unificat academic-spain (suporta BOE, DOI, arXiv, Dialnet)
+    if resolve_identifier_sync:
+        paper = resolve_identifier_sync(raw_input)
+        if paper:
+            if paper.source == "BOE":
+                m_norma = re.search(r'(?:Real\s+Decreto|RD|Ley\s+Org[aá]nica|LO|Ley|Orden)\s*(\d+[\/_\-]\d{4}|\d+)', paper.title, re.I)
+                if m_norma:
+                    clau_neta = re.sub(r'[^a-zA-Z0-9]', '', m_norma.group(0))
+                    citekey = f"boe{clau_neta}"
+                elif paper.extra and paper.extra.get("boe_id"):
+                    citekey = f"boe_{paper.extra['boe_id'].replace('-', '_')}"
+                else:
+                    citekey = f"boe_{re.sub(r'[^a-zA-Z0-9]', '', paper.title)[:20]}"
             else:
-                citekey = f"boe_{boe_id.replace('-', '_')}"
-                
+                first_author = paper.authors[0].split()[-1] if paper.authors else "Anon"
+                clean_author = re.sub(r'[^a-zA-Z]', '', first_author)
+                title_words = [w for w in re.sub(r'[^a-zA-Z\s]', '', paper.title).split() if len(w) > 3]
+                clean_title = "".join(w.capitalize() for w in title_words[:3]) or "Paper"
+                year = paper.published_date[:4] if paper.published_date else "nd"
+                citekey = f"{clean_author.lower()}{clean_title}{year}"
+
             target_pdf = PDF_DIR / f"{citekey}.pdf"
             pdf_saved = False
+            final_pdf_url = direct_pdf or paper.pdf_url
             if target_pdf.is_file():
                 pdf_saved = True
-            elif final_direct_pdf:
-                pdf_saved = download_pdf(final_direct_pdf, target_pdf)
-                
-            bib_entry = build_bibtex_from_dict(citekey, meta, target_pdf)
+            elif final_pdf_url:
+                pdf_saved = download_pdf(final_pdf_url, target_pdf)
+
+            bib_entry = paper_to_bibtex(paper, citekey=citekey, target_pdf_path=str(target_pdf) if pdf_saved else None)
             with open(BIB_FILE, "a", encoding="utf-8") as f:
                 f.write(f"\n{bib_entry}\n")
-                
-            create_initial_note(citekey, meta["title"], meta.get("authors", []), meta.get("year", ""), NOTES_DIR, abstract=meta.get("abstract", ""))
-            pdf_status = "📄 PDF oficial BOE desat" if pdf_saved else "⚠️ Sense PDF automàtic"
-            notify(f"⚖️ Norma BOE afegida: @{citekey}", f"{clean_latex(meta['title'])[:55]}...\n{pdf_status} | 📝 Nota creada")
-            print(f"✅ Norma BOE afegida: @{citekey} ({pdf_status})")
+
+            create_initial_note(
+                citekey,
+                paper.title,
+                paper.authors,
+                paper.published_date[:4] if paper.published_date else "",
+                NOTES_DIR,
+                abstract=paper.abstract
+            )
+            icon = "⚖️" if paper.source == "BOE" else "📚"
+            doc_type = "Norma BOE" if paper.source == "BOE" else "Document"
+            pdf_status = "📄 PDF desat" if pdf_saved else "⚠️ Sense PDF automàtic"
+            notify(f"{icon} {doc_type} afegida: @{citekey}", f"{clean_latex(paper.title)[:55]}...\n{pdf_status} | 📝 Nota creada")
+            print(f"✅ {doc_type} afegida: @{citekey} ({pdf_status})")
             return
 
-    # Resolució general de DOI o arXiv
+    # Resolució general de DOI o arXiv (fallback)
     doi, resolved_direct_pdf = resolve_doi_or_arxiv(raw_input)
     final_direct_pdf = direct_pdf or resolved_direct_pdf
     
@@ -1157,7 +1196,7 @@ def process_paper_input(raw_input, direct_pdf=None):
     process_paper_by_doi(doi, direct_pdf=final_direct_pdf)
 
 def interactive_search(initial_query=""):
-    """Mode interactiu: cerca federada en paral·lel a OpenAlex, ERIC, Crossref i Dialnet amb deduplicació."""
+    """Mode interactiu: cerca federada a través del motor unificat academic-spain amb deduplicació."""
     query = initial_query.strip()
     if not query:
         try:
@@ -1170,8 +1209,28 @@ def interactive_search(initial_query=""):
         print("Cerca buida. Eixint.")
         return
 
-    print(f"\n🔍 Cercant en paral·lel a OpenAlex, ERIC, Crossref i Dialnet: \"{query}\"...")
-    results = federated_search(query, limit_per_source=5)
+    if search_academic_sync:
+        print(f"\n🔍 Cercant amb el motor unificat academic-spain: \"{query}\"...")
+        search_res = search_academic_sync(query, sources="all", limit=5)
+        results = [
+            {
+                "title": p.title,
+                "authors": p.authors,
+                "year": p.published_date[:4] if p.published_date else "",
+                "doi": p.doi,
+                "oa_url": p.pdf_url,
+                "is_oa": bool(p.pdf_url),
+                "sources": [s.strip() for s in p.source.split(",")],
+                "abstract": p.abstract,
+                "url": p.url,
+                "paper": p
+            }
+            for p in search_res.get("results", [])
+        ]
+    else:
+        print(f"\n🔍 Cercant en paral·lel a OpenAlex, ERIC, Crossref i Dialnet: \"{query}\"...")
+        results = federated_search(query, limit_per_source=5)
+
     if not results:
         print("❌ No s'ha trobat cap article amb aquests termes.")
         return
@@ -1221,6 +1280,11 @@ def interactive_search(initial_query=""):
         print(f"Opció no vàlida. Introdueix un número entre 1 i {display_count}.")
 
     print(f"\n🚀 Processant selecció: {clean_latex(selected['title'])[:60]}...")
+    if selected.get("paper"):
+        p = selected["paper"]
+        process_paper_input(p.doi or p.url or p.title, direct_pdf=p.pdf_url)
+        return
+
     doi = selected.get("doi")
     direct_pdf = selected.get("oa_url")
     dialnet_id = selected.get("dialnet_id")
