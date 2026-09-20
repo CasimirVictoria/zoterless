@@ -507,6 +507,62 @@ def resolve_dialnet(text):
         
     return doi, pdf_url, title, meta
 
+def resolve_boe(text):
+    """Detecta URL o identificador del BOE (BOE-A-YYYY-NNNNN) i resol metadades i PDF oficial."""
+    m_boe = re.search(r'BOE-[A-Z]-\d{4}-\d+', text, re.I)
+    if not m_boe:
+        return None, None, None, {}
+    boe_id = m_boe.group(0).upper()
+    pdf_url = f"https://www.boe.es/buscar/act.php?id={boe_id}&p=pdf"
+    
+    meta = {
+        "title": f"Disposició Oficial {boe_id}",
+        "authors": ["Gobierno de España"],
+        "year": boe_id.split("-")[2] if len(boe_id.split("-")) >= 3 else "",
+        "url": f"https://www.boe.es/buscar/act.php?id={boe_id}",
+        "pdf_url": pdf_url,
+        "abstract": ""
+    }
+    
+    try:
+        import xml.etree.ElementTree as ET
+        xml_url = f"https://www.boe.es/diario_boe/xml.php?id={boe_id}"
+        req = Request(xml_url, headers=HEADERS)
+        with urlopen(req, timeout=10) as resp:
+            xml_text = resp.read().decode("utf-8", errors="ignore")
+        root = ET.fromstring(xml_text)
+        meta_el = root.find(".//metadatos")
+        if meta_el is not None:
+            t_el = meta_el.find("titulo")
+            if t_el is not None and t_el.text:
+                meta["title"] = t_el.text.strip()
+            dept_el = meta_el.find("departamento")
+            if dept_el is not None and dept_el.text:
+                meta["authors"] = [dept_el.text.strip()]
+            date_el = meta_el.find("fecha_disposicion")
+            if date_el is not None and date_el.text:
+                d_str = date_el.text.strip()
+                meta["year"] = d_str[:4] if len(d_str) >= 4 else meta["year"]
+            pdf_el = meta_el.find("url_pdf")
+            if pdf_el is not None and pdf_el.text:
+                p_val = pdf_el.text.strip()
+                meta["pdf_url"] = f"https://www.boe.es{p_val}" if p_val.startswith("/") else p_val
+                
+        texto_el = root.find(".//texto")
+        if texto_el is not None:
+            p_tags = texto_el.findall(".//p")
+            paras = []
+            for p in p_tags[:4]:
+                t_val = "".join(p.itertext()).strip()
+                if len(t_val) > 40:
+                    paras.append(t_val)
+            if paras:
+                meta["abstract"] = "\n\n".join(paras)
+    except Exception as e:
+        print(f"Avís resolent XML BOE: {e}", file=sys.stderr)
+        
+    return boe_id, meta["pdf_url"], meta["title"], meta
+
 def resolve_doi_or_arxiv(text):
     """Detecta i normalitza un DOI, identificador d'arXiv o Dialnet a partir de text o URL."""
     text = unquote(text).strip()
@@ -1048,6 +1104,36 @@ def process_paper_input(raw_input, direct_pdf=None):
             pdf_status = "📄 PDF desat" if pdf_saved else "⚠️ Sense PDF automàtic"
             notify(f"📚 Article Dialnet afegit: @{citekey}", f"{clean_latex(meta['title'])[:55]}...\n{pdf_status} | 📝 Nota creada")
             print(f"✅ Article Dialnet afegit: @{citekey} ({pdf_status})")
+            return
+
+    # Comprovació BOE específica
+    if "boe.es" in raw_input.lower() or "boe-" in raw_input.lower():
+        print("⚖️ Detectat document del BOE, resolent metadades oficials...")
+        boe_id, resolved_direct_pdf, boe_title, meta = resolve_boe(raw_input)
+        final_direct_pdf = direct_pdf or resolved_direct_pdf
+        if boe_id:
+            m_norma = re.search(r'(?:Real\s+Decreto|RD|Ley\s+Org[aá]nica|LO|Ley|Orden)\s*(\d+[\/_\-]\d{4}|\d+)', boe_title, re.I)
+            if m_norma:
+                clau_neta = re.sub(r'[^a-zA-Z0-9]', '', m_norma.group(0))
+                citekey = f"boe{clau_neta}"
+            else:
+                citekey = f"boe_{boe_id.replace('-', '_')}"
+                
+            target_pdf = PDF_DIR / f"{citekey}.pdf"
+            pdf_saved = False
+            if target_pdf.is_file():
+                pdf_saved = True
+            elif final_direct_pdf:
+                pdf_saved = download_pdf(final_direct_pdf, target_pdf)
+                
+            bib_entry = build_bibtex_from_dict(citekey, meta, target_pdf)
+            with open(BIB_FILE, "a", encoding="utf-8") as f:
+                f.write(f"\n{bib_entry}\n")
+                
+            create_initial_note(citekey, meta["title"], meta.get("authors", []), meta.get("year", ""), NOTES_DIR, abstract=meta.get("abstract", ""))
+            pdf_status = "📄 PDF oficial BOE desat" if pdf_saved else "⚠️ Sense PDF automàtic"
+            notify(f"⚖️ Norma BOE afegida: @{citekey}", f"{clean_latex(meta['title'])[:55]}...\n{pdf_status} | 📝 Nota creada")
+            print(f"✅ Norma BOE afegida: @{citekey} ({pdf_status})")
             return
 
     # Resolució general de DOI o arXiv
