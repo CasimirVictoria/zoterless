@@ -20,6 +20,7 @@ import concurrent.futures
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import unicodedata
@@ -892,6 +893,52 @@ def download_pdf(pdf_url, target_path):
         print(f"Error descarregant el PDF: {e}", file=sys.stderr)
     return False
 
+def check_and_import_from_downloads(target_path, title="", doi="", pmid=""):
+    """
+    Comprova si l'usuari ha descarregat el PDF manualment a ~/Downloads (p. ex. quan l'editorial
+    utilitza Cloudflare o protecció antibot com MDPI, ScienceDirect, etc.).
+    """
+    downloads_dir = Path.home() / "Downloads"
+    if not downloads_dir.is_dir():
+        return False
+
+    import time
+    now = time.time()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Paraules clau significatives del títol
+    title_words = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", title or "") if w.lower() not in {"with", "from", "that", "this", "study", "review", "their", "into", "journal", "clinical"}]
+    doi_clean = re.sub(r"[^a-zA-Z0-9]", "", doi.split("/")[-1] if "/" in doi else doi).lower()
+
+    for p in downloads_dir.glob("*.pdf"):
+        try:
+            mtime = p.stat().st_mtime
+            if now - mtime > 28800: # 8 hores
+                continue
+
+            fname_clean = re.sub(r"[^a-zA-Z0-9]", "", p.name).lower()
+            
+            # 1. Coincidència de nom amb DOI o PMID
+            if (pmid and str(pmid) in p.name) or (doi_clean and len(doi_clean) > 4 and doi_clean in fname_clean):
+                print(f"📥 PDF trobat a Descàrregues per nom: {p.name}")
+                shutil.copy2(p, target_path)
+                return True
+
+            # 2. Coincidència de text al contingut (primera pàgina)
+            if title_words:
+                res = subprocess.run(["pdftotext", "-l", "1", str(p), "-"], capture_output=True, text=True, timeout=2)
+                if res.returncode == 0:
+                    text_lower = res.stdout.lower()
+                    matches = sum(1 for w in title_words if w in text_lower)
+                    if matches >= min(3, len(title_words)):
+                        print(f"📥 PDF trobat a Descàrregues pel contingut: {p.name}")
+                        shutil.copy2(p, target_path)
+                        return True
+        except Exception:
+            continue
+
+    return False
+
 def key_exists_in_bib(key, bib_file):
     """Comprova si la clau ja existeix a biblioteca.bib."""
     if not bib_file.is_file():
@@ -1003,6 +1050,10 @@ def process_paper_by_doi(doi, direct_pdf=None, abstract=None):
             if unpaywall_url:
                 print(f"⬇️ Provant Unpaywall ({unpaywall_url[:65]}...)...")
                 pdf_saved = download_pdf(unpaywall_url, target_pdf)
+            
+        # 4. Fallback a ~/Downloads (protecció Cloudflare/MDPI/ScienceDirect)
+        if not pdf_saved:
+            pdf_saved = check_and_import_from_downloads(target_pdf, title=title, doi=doi)
             
     format_and_append_bibtex(raw_bib, citekey, target_pdf, BIB_FILE)
     create_initial_note(citekey, title, author, year, NOTES_DIR, abstract=final_abstract, doi=doi)
@@ -1166,8 +1217,19 @@ def process_paper_input(raw_input, direct_pdf=None):
                 pdf_saved = True
             elif final_pdf_url:
                 pdf_saved = download_pdf(final_pdf_url, target_pdf)
-            elif paper.doi:
-                pdf_saved = download_pdf_with_fallbacks(paper.doi, target_pdf)
+
+            if not pdf_saved and paper.doi:
+                doi_url = f"https://doi.org/{paper.doi}"
+                pdf_saved = download_pdf(doi_url, target_pdf)
+                if not pdf_saved:
+                    unpaywall_url = find_pdf_url(paper.doi)
+                    if unpaywall_url:
+                        pdf_saved = download_pdf(unpaywall_url, target_pdf)
+
+            # Fallback intel·ligent: comprovar a ~/Downloads
+            if not pdf_saved:
+                pmid_val = paper.extra.get("pmid") if (paper.extra and isinstance(paper.extra, dict)) else None
+                pdf_saved = check_and_import_from_downloads(target_pdf, title=paper.title, doi=paper.doi, pmid=pmid_val)
 
             bib_entry = paper_to_bibtex(paper, citekey=citekey, target_pdf_path=str(target_pdf) if pdf_saved else None)
             with open(BIB_FILE, "a", encoding="utf-8") as f:
