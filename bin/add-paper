@@ -1149,6 +1149,8 @@ def process_paper_input(raw_input, direct_pdf=None):
                     citekey = f"dogv_{paper.extra['codigo_insercion'].replace('/', '_')}"
                 else:
                     citekey = f"dogv_{re.sub(r'[^a-zA-Z0-9]', '', paper.title)[:20]}"
+            elif paper.extra and paper.extra.get("pmid"):
+                citekey = f"pmid{paper.extra['pmid']}"
             else:
                 first_author = paper.authors[0].split()[-1] if paper.authors else "Anon"
                 clean_author = re.sub(r'[^a-zA-Z]', '', first_author)
@@ -1164,6 +1166,8 @@ def process_paper_input(raw_input, direct_pdf=None):
                 pdf_saved = True
             elif final_pdf_url:
                 pdf_saved = download_pdf(final_pdf_url, target_pdf)
+            elif paper.doi:
+                pdf_saved = download_pdf_with_fallbacks(paper.doi, target_pdf)
 
             bib_entry = paper_to_bibtex(paper, citekey=citekey, target_pdf_path=str(target_pdf) if pdf_saved else None)
             with open(BIB_FILE, "a", encoding="utf-8") as f:
@@ -1177,11 +1181,12 @@ def process_paper_input(raw_input, direct_pdf=None):
                 NOTES_DIR,
                 abstract=paper.abstract
             )
-            icon = "⚖️" if paper.source == "BOE" else "🏛️" if paper.source == "DOGV" else "📚"
-            doc_type = "Norma BOE" if paper.source == "BOE" else "Norma DOGV" if paper.source == "DOGV" else "Document"
+            is_bio = "biomcp" in paper.source.lower() or (paper.extra and paper.extra.get("pmid"))
+            icon = "⚖️" if paper.source == "BOE" else "🏛️" if paper.source == "DOGV" else "🩺" if is_bio else "📚"
+            doc_type = "Norma BOE" if paper.source == "BOE" else "Norma DOGV" if paper.source == "DOGV" else "Article Mèdic" if is_bio else "Document"
             pdf_status = "📄 PDF desat" if pdf_saved else "⚠️ Sense PDF automàtic"
             notify(f"{icon} {doc_type} afegida: @{citekey}", f"{clean_latex(paper.title)[:55]}...\n{pdf_status} | 📝 Nota creada")
-            print(f"✅ {doc_type} afegida: @{citekey} ({pdf_status})")
+            print(f"✅ {doc_type} afegit: @{citekey} ({pdf_status})")
             return
 
     # Resolució general de DOI o arXiv (fallback)
