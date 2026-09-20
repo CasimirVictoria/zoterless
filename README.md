@@ -7,19 +7,24 @@
 
 ## 🎯 La Filosofia: Les 4 Peces Essencials en un Sol Dimoni
 
-La majoria d'investigadors i acadèmics que treballem amb fitxers plans (LaTeX, Markdown, Quarto, Typst) hem acabat configurant al llarg dels anys una pila de treball molt concreta i potent al voltant de l'ecosistema Zotero:
+Després d'acabar configurant al llarg dels anys una pila de treball molt concreta i potent al voltant de l'ecosistema Zotero:
 
 1. **Zotero Connector:** La millor extensió de navegador del món acadèmic per capturar articles científics, tesis i llibres en un sol clic des de revistes, catàlegs o PDFs en línia. *(És una eina imprescindible i la continuem emprant exactament igual).*
 2. **Better BibTeX (BBT):** El plugin clau per generar citekeys canòniques i predictibles (estil `autorTitolAny`) i mantindre sincronitzat un fitxer `.bib`.
 3. **ZotMoov (o ZotFile):** El plugin imprescindible per extreure els fitxers de la base de dades interna, reanomenar automàticament els PDFs amb la citekey estàndard i moure'ls a la nostra carpeta de documents.
 4. **Better Notes (Exportació Markdown):** El plugin per generar automàticament una plantilla de notes estructurada en Markdown amb metadades YAML i enllaços per a cada nova referència.
 
+Em vaig plantejar poder implementar aquest fluxe de manera senzilla, adaptant-lo a les meus necessitats específiques, emprant les eines que més solc emprar (el navegador web firefox i l'editor kate).
+
 ### 💥 La Paradoxa de la Pila Clàssica
-Per gaudir d'aquestes 4 funcionalitats essencials, estàvem obligats a:
+
+Per gaudir d'aquestes 4 funcionalitats essencials, havia de:
+
 - Mantindre oberta permanentment una aplicació feixuga de més de **500 MB de RAM** (Zotero Desktop, construït sobre el motor Gecko/Firefox i una base de dades SQLite opaca).
 - Configurar i mantindre **3 extensions de tercers en JavaScript**, que sovint es desincronitzen o es trenquen amb cada actualització major de Zotero (com va passar dolorosament amb el salt a Zotero 7).
 
 ### ⚡ La Solució `zoterless`
+
 **`zoterless` aglutina i fon aquestes 4 peces en un sol dimoni autònom de ~24 MB en Python pur**, sense dependències opaques:
 
 - **100% Compatible amb Zotero Connector:** Continuem fent clic a la icona oficial del navegador a Firefox. L'extensió envia la petició HTTP al port local `23119`, i `zotero-receiver` li respon amb el protocol natiu de Zotero.
@@ -128,11 +133,13 @@ flowchart LR
 ## 🚀 Instal·lació
 
 ### 1. Requisits previs (Debian / Ubuntu / Kubuntu)
+
 ```bash
 sudo apt install python3 python3-pyqt5 curl poppler-utils libnotify-bin
 ```
 
 ### 2. Clonar i instal·lar
+
 ```bash
 git clone https://github.com/CasimirVictoria/zoterless.git ~/Projects/zoterless
 cd ~/Projects/zoterless
@@ -141,6 +148,7 @@ chmod +x install.sh
 ```
 
 L'instal·lador:
+
 - Copia els binaris a `~/.local/bin/`.
 - Configura i activa el servei d'usuari a `systemd` (`zotero-receiver.service`).
 - El servei arrenca automàticament a cada inici de sessió consumint només **~24 MB**.
@@ -152,6 +160,7 @@ L'instal·lador:
 Per a una experiència de recerca fluida a KDE Plasma:
 
 ### 1. Inserir citació (`kate-citar`)
+
 - A Kate: **Configuració** → **Configura Kate** → **Eines externes** → **Afegeix**.
 - **Nom:** `Citar BibTeX`
 - **Ordre:** `kate-citar`
@@ -159,6 +168,7 @@ Per a una experiència de recerca fluida a KDE Plasma:
 - En prémer la drecera, s'obre un cercador ràpid en PyQt5. En triar una entrada i prémer `Enter`, s'insereix `@citekey` directament al text.
 
 ### 2. Menú d'accions contextuals (`kate-citar-actions`)
+
 - A Kate: **Eines externes** → **Afegeix**.
 - **Nom:** `Accions de Citació`
 - **Ordre:** `kate-citar-actions %{Document:Selection:Text}`
@@ -172,6 +182,7 @@ Per a una experiència de recerca fluida a KDE Plasma:
 ## 🛠️ Eines Addicionals
 
 ### `add-paper`: Gestor CLI i Cerca Federada Multilingüe
+
 Permet afegir articles i cercar literatura acadèmica directament des del terminal o el portapapers (Wayland/X11):
 
 ```bash
@@ -185,56 +196,77 @@ add-paper 10.18172/con.6302
 add-paper https://arxiv.org/abs/2301.00001
 add-paper https://dialnet.unirioja.es/servlet/articulo?codigo=6327318
 
-# 3. Connectar automàticament a EduVPN UV abans de la descàrrega per a articles de pagament:
+# 3. Descàrrega directa especificant la URL del PDF (descoberta per cercadors o repositoris):
+add-paper --pdf-url https://dialnet.unirioja.es/descarga/articulo/6327318.pdf 10.18172/con.6302
+
+# 4. Connectar automàticament a EduVPN UV abans de la descàrrega per a articles de pagament:
 add-paper --vpn 10.1016/j.compedu.2023.104845
 
-# 4. Mode autònom des del portapapers (llegeix automàticament el text copiat):
+# 5. Mode autònom des del portapapers (llegeix automàticament el text copiat):
 add-paper
 ```
 
+### 🔍 Resolució en Accés Obert Multi-Ubicació (100% Legal)
+
+Tant `zotero-receiver` (en fer clic al navegador) com `add-paper` incorporen una cascada de descàrrega legal d'alta precisió:
+1. **Unpaywall Multi-Location:** Itera sobre la totalitat de `oa_locations` del registre, prioritzant les versions allotjades en dipòsits institucionals universitaris (RODERIC UV, RiuNet UPV, Zenodo, PubMed Central) per sobre de les còpies d'editorial sovint bloquejades.
+2. **OpenAlex API (250M+ obres):** Resolució alternativa d'accés obert creuant metadades a través de `best_oa_location`, `primary_location` i `locations`.
+3. **Repositoris Nacionals i OJS:** Descàrrega directa des de dominis universitaris espanyols (Dialnet, CSIC, RACO, TDX).
+
 ### 🔒 Detecció Institucional d'EduVPN
+
 Quan un article pertany a una editorial sota subscripció (ScienceDirect, Springer, Wiley, IEEE, etc.) i no té PDF lliure en accés obert, `zoterless` comprova l'estat d'EduVPN (`nmcli`):
+
 - Si la VPN institucional no està activa, envia una notificació suggerint connectar-la (`nmcli con up eduvpn`).
 - Suporta descàrrega directa a través del túnel VPN WireGuard un cop connectat.
 
 ---
 
-## 🧬 Ecosistema i Integració amb Segon Cervell (Cervell2)
+## 🧬 Ecosistema i Integració: zoterless + Plec + mcp-server-academic-spain
 
-`zoterless` està dissenyat segons la **filosofia UNIX: fes una sola cosa i fes-la a la perfecció**. En lloc de convertir-se en un monòlit que ho faça tot, s'integra de forma nativa i desacoblada amb sistemes de gestió del coneixement personal (PKM) com **[Cervell2](https://github.com/CasimirVictoria/Cervell2)**:
+`zoterless` està dissenyat segons la **filosofia UNIX: fes una sola cosa i fes-la a la perfecció**. En lloc de convertir-se en un monòlit que ho faça tot, s'integra de forma nativa i desacoblada amb **[Plec](https://github.com/CasimirVictoria/plec)** (el banc de treball de lectura, anotació de PDFs i notes bibliogràfiques) i amb **[mcp-server-academic-spain](https://github.com/CasimirVictoria/mcp-server-academic-spain)** (el servidor MCP de cerca acadèmica federada en 18 bases de dades):
 
 ```mermaid
 flowchart TD
-    subgraph Ingesta ["CAPA D'INGESTA: zoterless (24 MB)"]
+    subgraph Ingesta ["CAPA D'INGESTA MULTICANAL"]
         Firefox["Firefox + Zotero Connector"] --> Receiver["zotero-receiver (Port 23119)"]
         CLI["add-paper (CLI multilingüe Argos)"]
+        MCP["mcp-server-academic-spain (18 bases de dades / IA)"]
     end
 
     subgraph Truth ["FONT DE VERITAT (Text Pla Estàndard)"]
         Bib["~/Documents/Biblioteca/biblioteca.bib"]
-        PDFs["~/Documents/Biblioteca/pdfs/"]
-        Notes["~/Documents/notes/@citekey.md"]
+        PDFs["~/Documents/Biblioteca/pdfs/{citekey}.pdf"]
+        Notes["~/Documents/notes/@{citekey}.md"]
     end
 
-    subgraph PKM ["CAPA D'ANÀLISI: Cervell2 (Desktop Qt & Web Hub)"]
-        GUI["Cervell2 Desktop / Web"]
-        Rerank["Cerca Semàntica (Sentence-Transformers)"]
-        Viewer["Visor PDF amb Subratllats Persistents"]
-        NLM["Google NotebookLM Studio"]
+    subgraph PKM ["CAPA DE LECTURA I ANOTACIÓ (Plec)"]
+        PlecWeb["Plec Workbench (PDF.js + Vditor + Cites Pandoc)"]
+        NotebookLM["NotebookLM Studio (IA RAG sobre Documents)"]
+        Kate["Editor Kate (@citekey / kate-citar)"]
     end
 
     Receiver --> Truth
     CLI --> Truth
+    MCP -->|save_to_library| Truth
 
-    Truth <--> GUI
-    Truth <--> Rerank
-    Truth <--> Viewer
-    Truth <--> NLM
+    Truth <--> PlecWeb
+    Truth <--> NotebookLM
+    Truth <--> Kate
 ```
 
-- **`zoterless` s'encarrega de l'operació ràpida:** Ingesta instantània des de Firefox o terminal, resolució DOI canònica, descàrrega i normalització a fitxers plans.
-- **`Cervell2` s'encarrega de la profunditat intel·lectual:** Reordenació semàntica dels resultats, lectura i subratllat vinculat a notes, connexió amb quaderns de NotebookLM i càlcul simbòlic.
-- **Zero bloqueig (*No vendor lock-in*):** Si `Cervell2` no està obert, `zoterless` funciona al 100% de la seua potència. Si `zoterless` actualitza un document, `Cervell2` el detecta a l'instant perquè llegeixen els mateixos fitxers.
+### Com es comuniquen els projectes:
+
+1. **Font de veritat única en text pla:**
+   - Tots els components comparteixen exactament els mateixos fitxers: `biblioteca.bib` per a les referències BibTeX, la carpeta `pdfs/{citekey}.pdf` per als documents, i `notes/@{citekey}.md` per a les fitxes d'estudi amb frontmatter YAML.
+2. **Ingesta transparent per a Plec:**
+   - Quan fas clic a la icona de Zotero Connector a Firefox, `zotero-receiver` processa la descàrrega, genera la referència BibTeX i crea la nota `@citekey.md`. Quan obris o recarregues `Plec`, tant el PDF com la seua nota d'estudi apareixen a l'instant llestos per a la lectura.
+3. **Cerca i importació des de Plec:**
+   - La interfície web de `Plec` incorpora la pestanya **[ 🌐 Cerca ]** connectada a `mcp-server-academic-spain` i a `add-paper`: permet cercar en 18 bases de dades i, amb el botó d'importació en un sol clic, cridar `add-paper --pdf-url` per afegir el document automàticament a la biblioteca.
+4. **Pont d'Intel·ligència Artificial (`mcp-server-academic-spain`):**
+   - El servidor MCP permet a qualsevol agent d'IA cercar en 18 bases de dades i desar directament articles a la biblioteca local `zoterless` i `Plec`.
+5. **Zero dependència mútua (*No vendor lock-in*):**
+   - Si Plec no està obert, `zoterless` funciona al 100% de la seua potència. Si `zoterless` actualitza un fitxer, Plec i Kate el detecten a l'instant.
 
 ---
 
@@ -259,10 +291,11 @@ Aquest projecte és un tribut sincer al programari lliure i s'alça directament 
 - Als projectes de ciència oberta i eines lliures: **OpenAlex**, **Crossref**, **ERIC (IES)**, **Dialnet**, **Unpaywall** i **Argos Translate**.
 
 ### 🤖 Autoria i Desenvolupament
+
 - **Concepció, visió del flux i necessitats d'investigació:** Casimir Victoria (@CasimirVictoria).
 - **Implementació tècnica i desenvolupament del codi:** Creat i afinat en programació en parella (*pair programming*) amb l'agent d'intel·ligència artificial **Antigravity** de Google DeepMind.
 
-> *"Aquest programari ha nascut de la necessitat pràctica d'un flux de treball acadèmic fluid, sobirà i basat estrictament en text pla. Com a investigador, he aportat les idees, l'experiència d'usuari i la direcció del disseny; la programació i la implementació tècnica del codi han estat dutes a terme per Antigravity."* — Casimir Victoria
+> *"Aquest programari ha nascut de la necessitat pràctica d'un flux de treball acadèmic fluid, sobirà i basat estrictament en text pla. Jo he aportat les idees, l'experiència d'usuari i la direcció del disseny; la programació i la implementació tècnica del codi han estat dutes a terme per Antigravity."* — Casimir Victoria
 
 ---
 

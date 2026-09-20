@@ -705,26 +705,57 @@ def scrape_pdf_links_from_html(html, base_url):
     return resolved
 
 def find_pdf_url(doi, direct_pdf=None):
-    """Localitza la URL de descàrrega directa del PDF (Unpaywall o metadades)."""
+    """Localitza la URL de descàrrega directa del PDF (Unpaywall multi-repositori, OpenAlex i metadades)."""
     if direct_pdf:
         return direct_pdf
         
     if not doi:
         return None
 
-    # 1. Consultar Unpaywall
+    # 1. Consultar Unpaywall (tots els repositoris institucionals OA)
     try:
-        unpaywall_url = f"https://api.unpaywall.org/v2/{doi}?email=casimir@users.noreply.github.com"
+        unpaywall_url = f"https://api.unpaywall.org/v2/{doi}?email=cavicas@alumni.uv.es"
         req = Request(unpaywall_url, headers=HEADERS)
         with urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+            # 1a. Millor ubicació OA
             best = data.get("best_oa_location")
             if best and best.get("url_for_pdf"):
                 return best["url_for_pdf"]
+            if best and best.get("url") and best["url"].lower().endswith(".pdf"):
+                return best["url"]
+            # 1b. Qualsevol altra ubicació OA (repositoris universitaris, preprint, PMC, Zenodo...)
+            for loc in data.get("oa_locations", []):
+                if loc.get("url_for_pdf"):
+                    return loc["url_for_pdf"]
+                if loc.get("url") and loc["url"].lower().endswith(".pdf"):
+                    return loc["url"]
     except Exception as e:
         print(f"Unpaywall: {e}", file=sys.stderr)
+
+    # 2. Consultar OpenAlex per a ubicacions OA addicionals
+    try:
+        oa_url = f"https://api.openalex.org/works/https://doi.org/{doi}"
+        req = Request(oa_url, headers=HEADERS)
+        with urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            best_loc = data.get("best_oa_location") or {}
+            if best_loc.get("pdf_url"):
+                return best_loc["pdf_url"]
+            prim_loc = data.get("primary_location") or {}
+            if prim_loc.get("pdf_url"):
+                return prim_loc["pdf_url"]
+            for loc in data.get("locations", []):
+                if loc.get("pdf_url"):
+                    return loc["pdf_url"]
+            if data.get("open_access", {}).get("oa_url"):
+                oa_u = data["open_access"]["oa_url"]
+                if oa_u and oa_u.lower().endswith(".pdf"):
+                    return oa_u
+    except Exception as e:
+        print(f"OpenAlex OA: {e}", file=sys.stderr)
         
-    # 2. Consultar directament la pàgina del DOI per scraping de metadades
+    # 3. Consultar directament la pàgina del DOI per scraping de metadades
     try:
         landing_url = f"https://doi.org/{doi}"
         req = Request(landing_url, headers=HEADERS)
@@ -925,7 +956,7 @@ def process_paper_by_doi(doi, direct_pdf=None, abstract=None):
     print(f"   Nota: ~/Documents/notes/@{citekey}.md")
     return True
 
-def process_paper_input(raw_input):
+def process_paper_input(raw_input, direct_pdf=None):
     """Processa qualsevol entrada: URL, DOI, Dialnet, cerca de text o dades estructurades."""
     raw_input = unquote(raw_input).strip()
     raw_input = re.sub(r'^(?:bibtex|bib):\/?\/?', '', raw_input, flags=re.IGNORECASE).strip()
@@ -943,7 +974,7 @@ def process_paper_input(raw_input):
         title = meta.get("title", "")
         authors = meta.get("authors", [])
         year = meta.get("year", "")
-        pdf_url = meta.get("pdf_url", "")
+        pdf_url = direct_pdf or meta.get("pdf_url", "")
         
         notify("Biblioteca", f"🔍 Processant article...\n{title[:50]}...")
         print(f"🔍 Processant dades estructurades: {title[:60]}...")
@@ -995,10 +1026,11 @@ def process_paper_input(raw_input):
     # Comprovació Dialnet específica
     if "dialnet" in raw_input.lower() or "codigo=" in raw_input.lower():
         print("🔍 Detectat enllaç de Dialnet, resolent metadades...")
-        doi, direct_pdf, dialnet_title, meta = resolve_dialnet(raw_input)
+        doi, resolved_direct_pdf, dialnet_title, meta = resolve_dialnet(raw_input)
+        final_direct_pdf = direct_pdf or resolved_direct_pdf
         if doi:
             print(f"✅ DOI trobat a Dialnet/OpenAlex: {doi}")
-            process_paper_by_doi(doi, direct_pdf=direct_pdf, abstract=meta.get("abstract", ""))
+            process_paper_by_doi(doi, direct_pdf=final_direct_pdf, abstract=meta.get("abstract", ""))
             return
         elif meta.get("title"):
             first_author = meta.get("authors", ["Desconegut"])[0] if meta.get("authors") else "Desconegut"
@@ -1007,8 +1039,8 @@ def process_paper_input(raw_input):
             pdf_saved = False
             if target_pdf.is_file():
                 pdf_saved = True
-            elif direct_pdf:
-                pdf_saved = download_pdf(direct_pdf, target_pdf)
+            elif final_direct_pdf:
+                pdf_saved = download_pdf(final_direct_pdf, target_pdf)
             bib_entry = build_bibtex_from_dict(citekey, meta, target_pdf)
             with open(BIB_FILE, "a", encoding="utf-8") as f:
                 f.write(f"\n{bib_entry}\n")
@@ -1019,7 +1051,8 @@ def process_paper_input(raw_input):
             return
 
     # Resolució general de DOI o arXiv
-    doi, direct_pdf = resolve_doi_or_arxiv(raw_input)
+    doi, resolved_direct_pdf = resolve_doi_or_arxiv(raw_input)
+    final_direct_pdf = direct_pdf or resolved_direct_pdf
     
     # Si no hem trobat DOI directe, intentem cercar el text a OpenAlex
     if not doi and not raw_input.startswith("http"):
@@ -1027,15 +1060,15 @@ def process_paper_input(raw_input):
         oa_work = search_openalex(raw_input)
         if oa_work and oa_work.get("doi"):
             doi = oa_work["doi"].replace("https://doi.org/", "").strip()
-            if not direct_pdf and oa_work.get("open_access", {}).get("oa_url"):
-                direct_pdf = oa_work["open_access"]["oa_url"]
+            if not final_direct_pdf and oa_work.get("open_access", {}).get("oa_url"):
+                final_direct_pdf = oa_work["open_access"]["oa_url"]
                 
     if not doi:
         notify("Biblioteca", f"⚠️ No s'ha pogut reconèixer cap DOI ni a OpenAlex:\n{raw_input[:60]}...", "critical")
         print(f"⚠️ No s'ha pogut reconèixer cap DOI ni a OpenAlex per a: {raw_input}", file=sys.stderr)
         sys.exit(1)
         
-    process_paper_by_doi(doi, direct_pdf=direct_pdf)
+    process_paper_by_doi(doi, direct_pdf=final_direct_pdf)
 
 def interactive_search(initial_query=""):
     """Mode interactiu: cerca federada en paral·lel a OpenAlex, ERIC, Crossref i Dialnet amb deduplicació."""
@@ -1157,6 +1190,14 @@ def main():
         if not is_eduvpn_active():
             connect_eduvpn()
 
+    direct_pdf_arg = None
+    if "--pdf-url" in args:
+        idx = args.index("--pdf-url")
+        if idx + 1 < len(args):
+            direct_pdf_arg = args[idx + 1]
+            args.pop(idx + 1)
+            args.pop(idx)
+
     if args and args[0] in ("-s", "--search"):
         query = " ".join(args[1:]).strip()
         interactive_search(query)
@@ -1174,7 +1215,7 @@ def main():
         print("Executa 'add-paper --help' o 'add-paper -s [termes]' per cercar interactivament.", file=sys.stderr)
         sys.exit(1)
         
-    process_paper_input(raw_input)
+    process_paper_input(raw_input, direct_pdf=direct_pdf_arg)
 
 if __name__ == "__main__":
     main()

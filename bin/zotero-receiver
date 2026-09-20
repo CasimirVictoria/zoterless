@@ -205,12 +205,12 @@ def search_crossref_by_title(title):
             if items:
                 doi = items[0].get("DOI")
                 found_title = items[0].get("title", [""])[0]
-                # Comprovació bàsica de coincidència
-                words_clean = set(re.findall(r'[a-zA-Z0-9]+', clean_title.lower()))
-                words_found = set(re.findall(r'[a-zA-Z0-9]+', found_title.lower()))
-                overlap = len(words_clean & words_found)
-                if overlap >= min(3, len(words_clean)):
-                    return doi
+                words_clean = set(w for w in re.findall(r'[a-zA-Z0-9]+', clean_title.lower()) if w not in STOPWORDS and len(w) > 2)
+                words_found = set(w for w in re.findall(r'[a-zA-Z0-9]+', found_title.lower()) if w not in STOPWORDS and len(w) > 2)
+                if words_clean and words_found:
+                    overlap = len(words_clean & words_found)
+                    if (overlap / len(words_clean)) >= 0.60:
+                        return doi
     except Exception as e:
         print(f"Error cercant DOI a Crossref: {e}", file=sys.stderr)
     return None
@@ -229,19 +229,51 @@ def fetch_bibtex_from_doi(doi):
     return None
 
 def find_unpaywall_pdf(doi):
-    """Consulta Unpaywall per trobar la URL directa del PDF en accés obert."""
+    """Consulta Unpaywall (tots els repositoris institucionals) i OpenAlex per trobar la URL directa del PDF en accés obert."""
     if not doi:
         return None
+
+    # 1. Unpaywall (multi-repositori)
     try:
-        url = f"https://api.unpaywall.org/v2/{doi}?email=casimir.research@gmail.com"
+        url = f"https://api.unpaywall.org/v2/{doi}?email=cavicas@alumni.uv.es"
         req = Request(url, headers=HEADERS)
         with urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             best = data.get("best_oa_location")
             if best and best.get("url_for_pdf"):
                 return best["url_for_pdf"]
+            if best and best.get("url") and best["url"].lower().endswith(".pdf"):
+                return best["url"]
+            for loc in data.get("oa_locations", []):
+                if loc.get("url_for_pdf"):
+                    return loc["url_for_pdf"]
+                if loc.get("url") and loc["url"].lower().endswith(".pdf"):
+                    return loc["url"]
     except Exception as e:
         print(f"Unpaywall error: {e}", file=sys.stderr)
+
+    # 2. OpenAlex (locations)
+    try:
+        oa_url = f"https://api.openalex.org/works/https://doi.org/{doi}"
+        req = Request(oa_url, headers=HEADERS)
+        with urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            best_loc = data.get("best_oa_location") or {}
+            if best_loc.get("pdf_url"):
+                return best_loc["pdf_url"]
+            prim_loc = data.get("primary_location") or {}
+            if prim_loc.get("pdf_url"):
+                return prim_loc["pdf_url"]
+            for loc in data.get("locations", []):
+                if loc.get("pdf_url"):
+                    return loc["pdf_url"]
+            if data.get("open_access", {}).get("oa_url"):
+                oa_u = data["open_access"]["oa_url"]
+                if oa_u and oa_u.lower().endswith(".pdf"):
+                    return oa_u
+    except Exception as e:
+        print(f"OpenAlex error: {e}", file=sys.stderr)
+
     return None
 
 
@@ -481,8 +513,9 @@ def process_zotero_item(item):
             if first_author_lastname == "desconegut":
                 first_author_lastname = c["name"].split()[-1]
 
-    # Si no tenim DOI o els autors estan incomplets ("Desconegut"), cercar a Crossref pel títol
-    if (not doi or first_author_lastname == "desconegut") and raw_title:
+    # Si no tenim DOI, cercar a Crossref pel títol NOMÉS si és un article acadèmic/llibre, MAI per a webs o blogs
+    is_web = item_type_raw in ["webpage", "blogPost", "newspaperArticle", "magazineArticle", "post"]
+    if not is_web and (not doi or first_author_lastname == "desconegut") and raw_title:
         discovered_doi = search_crossref_by_title(raw_title)
         if discovered_doi:
             doi = discovered_doi
@@ -531,7 +564,7 @@ def process_zotero_item(item):
         year_match = re.search(r'\b(19\d\d|20\d\d)\b', raw_date)
         year = year_match.group(1) if year_match else ""
         
-        journal = item.get("publicationTitle", "") or item.get("journal", "")
+        journal = item.get("publicationTitle", "") or item.get("journal", "") or item.get("websiteTitle", "")
         volume = item.get("volume", "")
         issue = item.get("issue", "")
         pages = item.get("pages", "")
@@ -542,6 +575,8 @@ def process_zotero_item(item):
             item_type = "book"
         elif item_type_raw == "bookSection":
             item_type = "incollection"
+        elif item_type_raw in ["webpage", "blogPost", "post"]:
+            item_type = "online"
         else:
             item_type = "misc"
 
@@ -645,6 +680,76 @@ def process_zotero_item(item):
             except Exception as e:
                 print(f"Error associant PDF des de Downloads: {e}", file=sys.stderr)
 
+    # 5h. Captura de pàgina web / article a PDF net via Trafilatura + Pandoc/XeLaTeX (sense Chromium)
+    web_article_text = ""
+    if not pdf_saved and item_url and item_url.startswith("http"):
+        try:
+            import trafilatura
+            downloaded = trafilatura.fetch_url(item_url)
+            if not downloaded:
+                res = subprocess.run([
+                    "curl", "-sL", "-A", HEADERS["User-Agent"], item_url
+                ], capture_output=True, text=True, timeout=15)
+                if res.returncode == 0 and res.stdout:
+                    downloaded = res.stdout
+
+            if downloaded:
+                meta = trafilatura.extract_metadata(downloaded)
+                article_md = trafilatura.extract(
+                    downloaded,
+                    output_format="markdown",
+                    include_tables=True,
+                    include_images=False
+                )
+                if article_md and len(article_md.strip()) > 100:
+                    web_article_text = article_md.strip()
+                    if (not title or title == "Sense títol") and meta and meta.title:
+                        title = meta.title
+                    if (not author_str or author_str == "Desconegut") and meta and meta.author:
+                        author_str = meta.author
+                    if not journal and meta and meta.sitename:
+                        journal = meta.sitename
+
+                    doc_title = title.replace('"', '\\"')
+                    doc_author = author_str.replace('"', '\\"')
+                    if meta and meta.sitename and meta.sitename not in doc_author:
+                        doc_author = f"{doc_author} ({meta.sitename})"
+                    doc_date = str(year) if year else ""
+                    if meta and meta.date:
+                        doc_date = str(meta.date)
+
+                    pdf_md = f"""---
+title: "{doc_title}"
+author: "{doc_author}"
+date: "{doc_date}"
+geometry: "paperwidth=170mm,paperheight=240mm,top=1.8cm,bottom=1.8cm,left=1.8cm,right=1.8cm"
+fontsize: 11pt
+linestretch: 1.18
+colorlinks: true
+linkcolor: "0.1,0.2,0.6"
+urlcolor: "0.1,0.2,0.6"
+mainfont: "DejaVu Serif"
+---
+
+{web_article_text}
+"""
+                    tmp_md = Path(f"/tmp/web_capture_{citekey}.md")
+                    tmp_md.write_text(pdf_md, encoding="utf-8")
+                    PDF_DIR.mkdir(parents=True, exist_ok=True)
+                    res = subprocess.run([
+                        "pandoc", str(tmp_md),
+                        "-o", str(target_pdf),
+                        "--pdf-engine=xelatex"
+                    ], capture_output=True, text=True, timeout=35)
+                    if res.returncode == 0 and target_pdf.is_file() and target_pdf.stat().st_size > 500:
+                        pdf_saved = True
+                    try:
+                        tmp_md.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"Error generant PDF d'article web amb Trafilatura/Pandoc: {e}", file=sys.stderr)
+
     # 6. Desar a biblioteca.bib
     raw_abstract = ""
     if canonical_bib:
@@ -673,12 +778,16 @@ def process_zotero_item(item):
     NOTES_DIR.mkdir(parents=True, exist_ok=True)
     note_path = NOTES_DIR / f"@{citekey}.md"
     if not note_path.is_file():
+        extra_article_section = ""
+        if web_article_text:
+            extra_article_section = f"\n# Contingut de l'article\n\n{web_article_text}\n"
         note_content = f"""---
 title: "{clean_latex(title)}"
 author: "{clean_latex(author_str)}"
 year: {year}
 citekey: "@{citekey}"
 doi: "{doi}"
+url: "{item_url}"
 tags: []
 ---
 # Resum / Abstract
@@ -688,12 +797,15 @@ tags: []
 # Idees clau
 
 * 
-"""
+{extra_article_section}"""
         note_path.write_text(note_content, encoding="utf-8")
 
     # 8. Notificació d'èxit
     if pdf_saved:
-        pdf_status = "📄 PDF desat"
+        if web_article_text:
+            pdf_status = "🌐 Article web maquetat a PDF"
+        else:
+            pdf_status = "📄 PDF desat"
     else:
         if not is_eduvpn_active():
             pdf_status = "⚠️ Sense PDF lliure (Connecta EduVPN UV per a accés institucional)"

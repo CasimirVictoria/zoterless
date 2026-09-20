@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""
+kate-sync-project: Generador i sincronitzador de la Biblioteca Virtual per a Kate (.kateproject)
+Llegeix les col·leccions virtuals de plec_collections.json (i el frontmatter YAML de les notes)
+i genera l'arbre de projecte natiu de Kate per tindre la Biblioteca Virtual a la barra lateral.
+"""
+
+import sys
+import os
+import json
+import re
+from pathlib import Path
+
+def get_base_dirs():
+    docs_dir = Path(os.environ.get("DOCUMENTS_DIR", Path.home() / "Documents")).resolve()
+    notes_dir = Path(os.environ.get("NOTES_DIR", docs_dir / "notes")).resolve()
+    bib_dir = Path(os.environ.get("BIB_DIR", docs_dir / "Biblioteca")).resolve()
+    pdfs_dir = Path(os.environ.get("PDFS_DIR", bib_dir / "pdfs")).resolve()
+    coll_file = bib_dir / "plec_collections.json"
+    
+    return docs_dir, notes_dir, bib_dir, pdfs_dir, coll_file
+
+def extract_yaml_frontmatter(file_path):
+    """Extreu metadades del frontmatter YAML d'una nota Markdown."""
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read(2048) # Llegir només la capçalera
+        if not content.startswith("---"):
+            return {}
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            return {}
+        yaml_text = parts[1]
+        
+        data = {}
+        # Parseig lleuger de llistes com: collections: [a, b] o tags: [x, y]
+        coll_match = re.search(r"collections\s*:\s*\[(.*?)\]", yaml_text, re.IGNORECASE)
+        if coll_match:
+            items = [x.strip().strip("'\"") for x in coll_match.group(1).split(",") if x.strip()]
+            data["collections"] = items
+            
+        tags_match = re.search(r"tags\s*:\s*\[(.*?)\]", yaml_text, re.IGNORECASE)
+        if tags_match:
+            items = [x.strip().strip("'\"") for x in tags_match.group(1).split(",") if x.strip()]
+            data["tags"] = items
+            
+        return data
+    except Exception:
+        return {}
+
+def sync_kateproject(verbose=True):
+    docs_dir, notes_dir, bib_dir, pdfs_dir, coll_file = get_base_dirs()
+    
+    if not docs_dir.exists():
+        if verbose:
+            print(f"Error: El directori {docs_dir} no existeix.")
+        return False
+
+    # 1. Carregar col·leccions des de plec_collections.json
+    collections_data = []
+    if coll_file.exists():
+        try:
+            with open(coll_file, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+                if isinstance(raw, dict) and "collections" in raw:
+                    collections_data = raw["collections"]
+        except Exception as e:
+            if verbose:
+                print(f"Avís llegint plec_collections.json: {e}")
+
+    # Mapa de col·leccions per nom o id
+    col_map = {}
+    for col in collections_data:
+        cid = col.get("id") or col.get("name")
+        cname = col.get("name") or "Sense nom"
+        notes_set = set(col.get("notes", []))
+        pdfs_set = set(col.get("pdfs", []))
+        col_map[cid] = {
+            "name": cname,
+            "parent_id": col.get("parent_id"),
+            "notes": notes_set,
+            "pdfs": pdfs_set
+        }
+
+    # 2. Escanejar notes Markdown per si tenen col·leccions o tags al YAML
+    if notes_dir.exists():
+        for note_path in notes_dir.glob("*.md"):
+            meta = extract_yaml_frontmatter(note_path)
+            note_name = note_path.name
+            
+            # Comprovar si té PDF associat canònic
+            citekey = note_path.stem.lstrip("@")
+            pdf_candidate = pdfs_dir / f"{citekey}.pdf"
+            has_pdf = pdf_candidate.is_file()
+            pdf_name = pdf_candidate.name if has_pdf else None
+            
+            # Afegir a col·leccions segons YAML
+            for tag in meta.get("collections", []) + meta.get("tags", []):
+                tag_clean = tag.strip()
+                if not tag_clean:
+                    continue
+                # Buscar si ja existeix la col·lecció
+                found_id = None
+                for cid, cinfo in col_map.items():
+                    if cinfo["name"].lower() == tag_clean.lower():
+                        found_id = cid
+                        break
+                if not found_id:
+                    found_id = f"col_tag_{tag_clean.lower()}"
+                    col_map[found_id] = {
+                        "name": tag_clean,
+                        "parent_id": None,
+                        "notes": set(),
+                        "pdfs": set()
+                    }
+                col_map[found_id]["notes"].add(note_name)
+                if pdf_name:
+                    col_map[found_id]["pdfs"].add(pdf_name)
+
+    # 3. Construir subprojectes de Kate per a cada col·lecció
+    subprojects = []
+    all_assigned_notes = set()
+    all_assigned_pdfs = set()
+
+    for cid, cinfo in sorted(col_map.items(), key=lambda x: x[1]["name"].lower()):
+        cname = cinfo["name"]
+        notes_list = sorted([n for n in cinfo["notes"] if (notes_dir / n).exists()])
+        pdfs_list = sorted([p for p in cinfo["pdfs"] if (pdfs_dir / p).exists()])
+
+        all_assigned_notes.update(notes_list)
+        all_assigned_pdfs.update(pdfs_list)
+
+        files_entry = []
+        if notes_list:
+            files_entry.append({
+                "directory": "notes",
+                "filters": notes_list,
+                "recursive": 0
+            })
+        if pdfs_list:
+            files_entry.append({
+                "directory": "Biblioteca/pdfs",
+                "filters": pdfs_list,
+                "recursive": 0
+            })
+
+        if files_entry:
+            subprojects.append({
+                "name": f"📁 {cname}",
+                "files": files_entry
+            })
+
+    # Notes soltes (sense col·lecció assignada)
+    all_notes = sorted([f.name for f in notes_dir.glob("*.md")]) if notes_dir.exists() else []
+    unassigned_notes = [n for n in all_notes if n not in all_assigned_notes]
+    if unassigned_notes:
+        subprojects.append({
+            "name": f"📁 Notes Soltes ({len(unassigned_notes)})",
+            "files": [{
+                "directory": "notes",
+                "filters": unassigned_notes,
+                "recursive": 0
+            }]
+        })
+
+    # Subprojectes per a veure tot el contingut global
+    if all_notes:
+        subprojects.append({
+            "name": f"📂 Totes les Notes ({len(all_notes)})",
+            "files": [{
+                "directory": "notes",
+                "filters": ["*.md", "*.org", "*.qmd", "*.txt"],
+                "recursive": 0
+            }]
+        })
+
+    all_pdfs = sorted([f.name for f in pdfs_dir.glob("*.pdf")]) if pdfs_dir.exists() else []
+    if all_pdfs:
+        subprojects.append({
+            "name": f"📂 Tots els PDFs ({len(all_pdfs)})",
+            "files": [{
+                "directory": "Biblioteca/pdfs",
+                "filters": ["*.pdf"],
+                "recursive": 0
+            }]
+        })
+
+    # 4. Estructura mestra del .kateproject
+    kateproject = {
+        "name": "📚 Segon Cervell & Biblioteca",
+        "directory": str(docs_dir),
+        "projects": subprojects,
+        "files": []
+    }
+
+    # Afegir biblioteca.bib a nivell arrel si existeix
+    bib_file = bib_dir / "biblioteca.bib"
+    if bib_file.exists():
+        kateproject["files"].append({
+            "directory": "Biblioteca",
+            "filters": ["biblioteca.bib"],
+            "recursive": 0
+        })
+    else:
+        kateproject["files"].append({
+            "directory": "notes",
+            "filters": ["*.md"],
+            "recursive": 0
+        })
+
+    # 5. Desar a ~/Documents/.kateproject
+    target_file = docs_dir / ".kateproject"
+    try:
+        with open(target_file, "w", encoding="utf-8") as f:
+            json.dump(kateproject, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        if verbose:
+            print(f"Error escrivint {target_file}: {e}")
+        return False
+
+    # 6. Sincronitzar enllaç simbòlic a ~/Documents/notes/.kateproject
+    notes_kp = notes_dir / ".kateproject"
+    try:
+        if notes_kp.exists() or notes_kp.is_symlink():
+            notes_kp.unlink()
+        notes_kp.symlink_to(target_file)
+    except Exception as e:
+        # Fallback a còpia si symlink falla
+        try:
+            with open(notes_kp, "w", encoding="utf-8") as f:
+                json.dump(kateproject, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    if verbose:
+        total_cols = len(subprojects)
+        total_notes = len(list(notes_dir.glob("*.md"))) if notes_dir.exists() else 0
+        total_pdfs = len(list(pdfs_dir.glob("*.pdf"))) if pdfs_dir.exists() else 0
+        print(f"✓ .kateproject sincronitzat amb èxit:")
+        print(f"   • {total_cols} col·leccions virtuals")
+        print(f"   • {total_notes} notes a ~/Documents/notes/")
+        print(f"   • {total_pdfs} PDFs a ~/Documents/Biblioteca/pdfs/")
+        print(f"   • Fitxer destí: {target_file}")
+
+    return True
+
+if __name__ == "__main__":
+    verbose = "-q" not in sys.argv and "--quiet" not in sys.argv
+    sync_kateproject(verbose=verbose)
