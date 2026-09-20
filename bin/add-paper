@@ -1140,6 +1140,15 @@ def process_paper_input(raw_input, direct_pdf=None):
                     citekey = f"boe_{paper.extra['boe_id'].replace('-', '_')}"
                 else:
                     citekey = f"boe_{re.sub(r'[^a-zA-Z0-9]', '', paper.title)[:20]}"
+            elif paper.source == "DOGV":
+                m_norma = re.search(r'(?:Decret|Ordre|Llei|Resoluci[oó]|Acord)\s*(\d+[\/_\-]\d{4}|\d+)', paper.title, re.I)
+                if m_norma:
+                    clau_neta = re.sub(r'[^a-zA-Z0-9]', '', m_norma.group(0))
+                    citekey = f"dogv{clau_neta}"
+                elif paper.extra and paper.extra.get("codigo_insercion"):
+                    citekey = f"dogv_{paper.extra['codigo_insercion'].replace('/', '_')}"
+                else:
+                    citekey = f"dogv_{re.sub(r'[^a-zA-Z0-9]', '', paper.title)[:20]}"
             else:
                 first_author = paper.authors[0].split()[-1] if paper.authors else "Anon"
                 clean_author = re.sub(r'[^a-zA-Z]', '', first_author)
@@ -1168,8 +1177,8 @@ def process_paper_input(raw_input, direct_pdf=None):
                 NOTES_DIR,
                 abstract=paper.abstract
             )
-            icon = "⚖️" if paper.source == "BOE" else "📚"
-            doc_type = "Norma BOE" if paper.source == "BOE" else "Document"
+            icon = "⚖️" if paper.source == "BOE" else "🏛️" if paper.source == "DOGV" else "📚"
+            doc_type = "Norma BOE" if paper.source == "BOE" else "Norma DOGV" if paper.source == "DOGV" else "Document"
             pdf_status = "📄 PDF desat" if pdf_saved else "⚠️ Sense PDF automàtic"
             notify(f"{icon} {doc_type} afegida: @{citekey}", f"{clean_latex(paper.title)[:55]}...\n{pdf_status} | 📝 Nota creada")
             print(f"✅ {doc_type} afegida: @{citekey} ({pdf_status})")
