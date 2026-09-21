@@ -1200,6 +1200,158 @@ def process_paper_by_doi(doi, direct_pdf=None, abstract=None):
     print(f"   Nota: ~/Documents/notes/@{citekey}.md")
     return True
 
+def process_web_article(url):
+    """Captura un article web o pàgina a PDF net maquetat amb Trafilatura + XeLaTeX (DejaVu Serif)."""
+    print(f"🌐 Processant article web des de: {url}...")
+    notify("Biblioteca", f"🌐 Capturant article web...\n{url[:50]}...")
+    try:
+        import trafilatura
+    except ImportError:
+        print("⚠️ Cal tenir instal·lat 'trafilatura' per capturar pàgines web.", file=sys.stderr)
+        notify("Biblioteca", "⚠️ Falta la biblioteca trafilatura", "critical")
+        return False
+
+    downloaded = trafilatura.fetch_url(url)
+    if not downloaded:
+        res = subprocess.run([
+            "curl", "-sL", "-A", HEADERS["User-Agent"], url
+        ], capture_output=True, text=True, timeout=15)
+        if res.returncode == 0 and res.stdout:
+            downloaded = res.stdout
+
+    if not downloaded:
+        print(f"❌ No s'ha pogut descarregar el contingut de: {url}", file=sys.stderr)
+        notify("Biblioteca", f"❌ Error descarregant pàgina web", "critical")
+        return False
+
+    meta = trafilatura.extract_metadata(downloaded)
+    article_md = trafilatura.extract(
+        downloaded,
+        output_format="markdown",
+        include_tables=True,
+        include_images=False
+    )
+
+    title = meta.title if meta and meta.title else "Article sense títol"
+    author_str = meta.author if meta and meta.author else ""
+    journal = meta.sitename if meta and meta.sitename else ""
+    date_str = str(meta.date) if meta and meta.date else ""
+    year_m = re.search(r'\b(19\d\d|20\d\d)\b', date_str)
+    year = year_m.group(1) if year_m else ""
+
+    if not author_str or author_str.lower() in ("desconegut", "unknown", "admin"):
+        # 1. Provar etiquetes d'autor a l'HTML
+        m_aut = re.search(r'<[a-zA-Z0-9]+\b[^>]*class=["\'][^"\']*(?:author|autor|byline)[^"\']*["\'][^>]*>[\s\S]*?<a\b[^>]*>([^<]+)</a>', downloaded, re.I)
+        if not m_aut:
+            m_aut = re.search(r'href=["\']/auto(?:r|res)/[^"\']+["\'][^>]*>([^<]+)</a>', downloaded, re.I)
+        if m_aut:
+            author_str = m_aut.group(1).strip()
+        else:
+            m_title_aut = re.search(r'<title>([^<]+)</title>', downloaded, re.I)
+            if m_title_aut:
+                parts = [p.strip() for p in re.split(r'\s*[-–—|]\s*', m_title_aut.group(1))]
+                if len(parts) >= 3:
+                    author_str = parts[-2]
+    if not author_str:
+        author_str = "Desconegut"
+
+    first_author_clean = clean_author_surname(author_str)
+    citekey = generate_citekey(first_author_clean, title, year)
+
+    target_pdf = PDF_DIR / f"{citekey}.pdf"
+    note_path = NOTES_DIR / f"@{citekey}.md"
+
+    if key_exists_in_bib(citekey, BIB_FILE) and target_pdf.is_file() and note_path.is_file():
+        notify("Biblioteca", f"ℹ️ L'article web ja existeix a la biblioteca:\n@{citekey}")
+        print(f"ℹ️ L'article web ja existeix a la biblioteca: @{citekey}")
+        return True
+
+    doc_title = title.replace('"', '\\"')
+    doc_author = author_str.replace('"', '\\"')
+    if journal and journal not in doc_author:
+        doc_author = f"{doc_author} ({journal})"
+    doc_date = date_str or str(year)
+
+    pdf_saved = False
+    if article_md and len(article_md.strip()) > 50:
+        pdf_md = f"""---
+title: "{doc_title}"
+author: "{doc_author}"
+date: "{doc_date}"
+geometry: "paperwidth=170mm,paperheight=240mm,top=1.8cm,bottom=1.8cm,left=1.8cm,right=1.8cm"
+fontsize: 11pt
+linestretch: 1.18
+colorlinks: true
+linkcolor: "0.1,0.2,0.6"
+urlcolor: "0.1,0.2,0.6"
+mainfont: "DejaVu Serif"
+---
+
+{article_md.strip()}
+"""
+        tmp_md = Path(f"/tmp/web_capture_{citekey}.md")
+        tmp_md.write_text(pdf_md, encoding="utf-8")
+        PDF_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            res = subprocess.run([
+                "pandoc", str(tmp_md),
+                "-o", str(target_pdf),
+                "--pdf-engine=xelatex"
+            ], capture_output=True, text=True, timeout=35)
+            if res.returncode == 0 and target_pdf.is_file() and target_pdf.stat().st_size > 500:
+                pdf_saved = True
+        except Exception as e:
+            print(f"Error compilant PDF amb XeLaTeX: {e}", file=sys.stderr)
+        finally:
+            tmp_md.unlink(missing_ok=True)
+
+    fields = {
+        "title": title,
+        "author": author_str,
+        "year": year,
+        "journal": journal,
+        "url": url,
+        "file": str(target_pdf) if pdf_saved else ""
+    }
+    if not key_exists_in_bib(citekey, BIB_FILE):
+        lines = [f"@online{{{citekey},"]
+        for k, v in fields.items():
+            if v:
+                lines.append(f"  {k} = {{{v}}},")
+        lines.append("}")
+        with open(BIB_FILE, "a", encoding="utf-8") as f:
+            f.write(f"\n{chr(10).join(lines)}\n")
+
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    if not note_path.is_file():
+        extra_article = f"\n# Contingut de l'article\n\n{article_md.strip()}\n" if article_md else ""
+        note_content = f"""---
+title: "{clean_latex(title)}"
+author: "{clean_latex(author_str)}"
+year: {year}
+citekey: "@{citekey}"
+doi: "None"
+url: "{url}"
+tags: []
+---
+# Resum / Abstract
+
+# Idees clau
+
+* 
+{extra_article}"""
+        note_path.write_text(note_content, encoding="utf-8")
+
+    pdf_status = "🌐 Article web maquetat a PDF" if pdf_saved else "⚠️ Sense PDF"
+    short_title = clean_latex(title)[:57] + "..." if len(clean_latex(title)) > 60 else clean_latex(title)
+    notify(f"📚 Article web afegit: @{citekey}", f"{short_title}\n{pdf_status} | 📝 Nota creada")
+    print(f"✅ Article web afegit amb èxit: @{citekey}")
+    print(f"   Títol: {short_title}")
+    print(f"   Estat: {pdf_status}")
+    print(f"   PDF: {target_pdf}")
+    print(f"   Nota: {note_path}")
+    return True
+
 def process_paper_input(raw_input, direct_pdf=None):
     """Processa qualsevol entrada: URL, DOI, Dialnet, cerca de text o dades estructurades."""
     raw_input = unquote(raw_input).strip()
@@ -1297,6 +1449,18 @@ def process_paper_input(raw_input, direct_pdf=None):
             notify(f"📚 Article Dialnet afegit: @{citekey}", f"{clean_latex(meta['title'])[:55]}...\n{pdf_status} | 📝 Nota creada")
             print(f"✅ Article Dialnet afegit: @{citekey} ({pdf_status})")
             return
+
+    # 0. Si és una URL web genèrica (no BOE, DOGV, arXiv, Dialnet, PubMed o DOI), capturar directament com a article web
+    if raw_input.startswith("http://") or raw_input.startswith("https://"):
+        is_academic_url = bool(
+            re.search(r'10\.\d{4,9}/', raw_input) or
+            any(k in raw_input.lower() for k in [
+                "boe.es", "dogv.gva.es", "pubmed", "ncbi.nlm.nih.gov",
+                "arxiv.org", "dialnet.unirioja.es", "doi.org"
+            ])
+        )
+        if not is_academic_url:
+            return process_web_article(raw_input)
 
     # 1. Intent de resolució mitjançant el motor unificat academic-spain (suporta BOE, DOI, arXiv, Dialnet)
     if resolve_identifier_sync:
@@ -1415,6 +1579,8 @@ def process_paper_input(raw_input, direct_pdf=None):
                 final_direct_pdf = oa_work["open_access"]["oa_url"]
                 
     if not doi:
+        if raw_input.startswith("http://") or raw_input.startswith("https://"):
+            return process_web_article(raw_input)
         notify("Biblioteca", f"⚠️ No s'ha pogut reconèixer cap DOI ni a OpenAlex:\n{raw_input[:60]}...", "critical")
         print(f"⚠️ No s'ha pogut reconèixer cap DOI ni a OpenAlex per a: {raw_input}", file=sys.stderr)
         sys.exit(1)
