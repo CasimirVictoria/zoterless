@@ -227,9 +227,9 @@ Quan un article pertany a una editorial sota subscripció (ScienceDirect, Spring
 
 ---
 
-## 🧬 Ecosistema i Integració: zoterless + Plec + mcp-server-academic-spain
+## 🧬 Ecosistema i Integració: zoterless + Faristol + mcp-server-academic-spain
 
-`zoterless` està dissenyat segons la **filosofia UNIX: fes una sola cosa i fes-la a la perfecció**. En lloc de convertir-se en un monòlit que ho faça tot, s'integra de forma nativa i desacoblada amb **[Plec](https://github.com/CasimirVictoria/plec)** (el banc de treball de lectura, anotació de PDFs i notes bibliogràfiques) i amb **[mcp-server-academic-spain](https://github.com/CasimirVictoria/mcp-server-academic-spain)** (el servidor MCP de cerca acadèmica federada en 18 bases de dades):
+`zoterless` està dissenyat segons la **filosofia UNIX: fes una sola cosa i fes-la a la perfecció**. En lloc de convertir-se en un monòlit que ho faça tot, s'integra de forma nativa i desacoblada amb **[Faristol](https://github.com/CasimirVictoria/faristol)** (el banc de treball de lectura, anotació de PDFs i notes bibliogràfiques) i amb **[mcp-server-academic-spain](https://github.com/CasimirVictoria/mcp-server-academic-spain)** (el servidor MCP de cerca acadèmica federada en 18 bases de dades):
 
 ```mermaid
 flowchart TD
@@ -245,8 +245,8 @@ flowchart TD
         Notes["~/Documents/notes/@{citekey}.md"]
     end
 
-    subgraph PKM ["CAPA DE LECTURA I ANOTACIÓ (Plec)"]
-        PlecWeb["Plec Workbench (PDF.js + Vditor + Cites Pandoc)"]
+    subgraph PKM ["CAPA DE LECTURA I ANOTACIÓ (Faristol)"]
+        FaristolWeb["Faristol Workbench (PDF.js + Vditor + Cites Pandoc)"]
         NotebookLM["NotebookLM Studio (IA RAG sobre Documents)"]
         Kate["Editor Kate (@citekey / kate-citar)"]
     end
@@ -255,7 +255,7 @@ flowchart TD
     CLI --> Truth
     MCP -->|save_to_library| Truth
 
-    Truth <--> PlecWeb
+    Truth <--> FaristolWeb
     Truth <--> NotebookLM
     Truth <--> Kate
 ```
@@ -264,14 +264,14 @@ flowchart TD
 
 1. **Font de veritat única en text pla:**
    - Tots els components comparteixen exactament els mateixos fitxers: `biblioteca.bib` per a les referències BibTeX, la carpeta `pdfs/{citekey}.pdf` per als documents, i `notes/@{citekey}.md` per a les fitxes d'estudi amb frontmatter YAML.
-2. **Ingesta transparent per a Plec:**
-   - Quan fas clic a la icona de Zotero Connector a Firefox, `zotero-receiver` processa la descàrrega, genera la referència BibTeX i crea la nota `@citekey.md`. Quan obris o recarregues `Plec`, tant el PDF com la seua nota d'estudi apareixen a l'instant llestos per a la lectura.
-3. **Cerca i importació des de Plec:**
-   - La interfície web de `Plec` incorpora la pestanya **[ 🌐 Cerca ]** connectada a `mcp-server-academic-spain` i a `add-paper`: permet cercar en 18 bases de dades i, amb el botó d'importació en un sol clic, cridar `add-paper --pdf-url` per afegir el document automàticament a la biblioteca.
+2. **Ingesta transparent per a Faristol:**
+   - Quan fas clic a la icona de Zotero Connector a Firefox, `zotero-receiver` processa la descàrrega, genera la referència BibTeX i crea la nota `@citekey.md`. Quan obris o recarregues `Faristol`, tant el PDF com la seua nota d'estudi apareixen a l'instant llestos per a la lectura.
+3. **Cerca i importació des de Faristol:**
+   - La interfície web de `Faristol` incorpora la pestanya **[ 🌐 Cerca ]** connectada a `mcp-server-academic-spain` i a `add-paper`: permet cercar en 18 bases de dades i, amb el botó d'importació en un sol clic, cridar `add-paper --pdf-url` per afegir el document automàticament a la biblioteca.
 4. **Pont d'Intel·ligència Artificial (`mcp-server-academic-spain`):**
-   - El servidor MCP permet a qualsevol agent d'IA cercar en 18 bases de dades i desar directament articles a la biblioteca local `zoterless` i `Plec`.
+   - El servidor MCP permet a qualsevol agent d'IA cercar en 18 bases de dades i desar directament articles a la biblioteca local `zoterless` i `Faristol`.
 5. **Zero dependència mútua (*No vendor lock-in*):**
-   - Si Plec no està obert, `zoterless` funciona al 100% de la seua potència. Si `zoterless` actualitza un fitxer, Plec i Kate el detecten a l'instant.
+   - Si Faristol no està obert, `zoterless` funciona al 100% de la seua potència. Si `zoterless` actualitza un fitxer, Faristol i Kate el detecten a l'instant.
 
 ---
 

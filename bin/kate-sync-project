@@ -16,7 +16,15 @@ def get_base_dirs():
     notes_dir = Path(os.environ.get("NOTES_DIR", docs_dir / "notes")).resolve()
     bib_dir = Path(os.environ.get("BIB_DIR", docs_dir / "Biblioteca")).resolve()
     pdfs_dir = Path(os.environ.get("PDFS_DIR", bib_dir / "pdfs")).resolve()
-    coll_file = bib_dir / "plec_collections.json"
+    
+    # Fitxer de col·leccions de Faristol / Plec
+    coll_file = Path.home() / ".config/faristol/collections.json"
+    if not coll_file.exists():
+        coll_file = bib_dir / "faristol_collections.json"
+    if not coll_file.exists():
+        coll_file = Path.home() / ".config/plec/collections.json"
+    if not coll_file.exists():
+        coll_file = bib_dir / "plec_collections.json"
     
     return docs_dir, notes_dir, bib_dir, pdfs_dir, coll_file
 
