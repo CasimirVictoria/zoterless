@@ -235,27 +235,27 @@ def fetch_bibtex_from_doi(doi):
         print(f"Error obtenint BibTeX per a {doi}: {e}", file=sys.stderr)
     return None
 
-def find_unpaywall_pdf(doi):
-    """Consulta Unpaywall (tots els repositoris institucionals) i OpenAlex per trobar la URL directa del PDF en accés obert."""
+def find_unpaywall_pdfs(doi):
+    """Consulta Unpaywall (tots els repositoris institucionals) i OpenAlex per trobar les URLs del PDF en accés obert."""
     if not doi:
-        return None
+        return []
 
+    candidates = []
     # 1. Unpaywall (multi-repositori)
     try:
         url = f"https://api.unpaywall.org/v2/{doi}?email=cavicas@alumni.uv.es"
         req = Request(url, headers=HEADERS)
         with urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            best = data.get("best_oa_location")
-            if best and best.get("url_for_pdf"):
-                return best["url_for_pdf"]
-            if best and best.get("url") and best["url"].lower().endswith(".pdf"):
-                return best["url"]
+            best = data.get("best_oa_location") or {}
+            if best.get("url_for_pdf"):
+                candidates.append(best["url_for_pdf"])
+            elif best.get("url"):
+                candidates.append(best["url"])
             for loc in data.get("oa_locations", []):
-                if loc.get("url_for_pdf"):
-                    return loc["url_for_pdf"]
-                if loc.get("url") and loc["url"].lower().endswith(".pdf"):
-                    return loc["url"]
+                u = loc.get("url_for_pdf") or loc.get("url")
+                if u and u not in candidates:
+                    candidates.append(u)
     except Exception as e:
         print(f"Unpaywall error: {e}", file=sys.stderr)
 
@@ -266,22 +266,20 @@ def find_unpaywall_pdf(doi):
         with urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             best_loc = data.get("best_oa_location") or {}
-            if best_loc.get("pdf_url"):
-                return best_loc["pdf_url"]
+            if best_loc.get("pdf_url") and best_loc["pdf_url"] not in candidates:
+                candidates.append(best_loc["pdf_url"])
             prim_loc = data.get("primary_location") or {}
-            if prim_loc.get("pdf_url"):
-                return prim_loc["pdf_url"]
+            if prim_loc.get("pdf_url") and prim_loc["pdf_url"] not in candidates:
+                candidates.append(prim_loc["pdf_url"])
             for loc in data.get("locations", []):
-                if loc.get("pdf_url"):
-                    return loc["pdf_url"]
-            if data.get("open_access", {}).get("oa_url"):
-                oa_u = data["open_access"]["oa_url"]
-                if oa_u and oa_u.lower().endswith(".pdf"):
-                    return oa_u
+                if loc.get("pdf_url") and loc["pdf_url"] not in candidates:
+                    candidates.append(loc["pdf_url"])
+            if data.get("open_access", {}).get("oa_url") and data["open_access"]["oa_url"] not in candidates:
+                candidates.append(data["open_access"]["oa_url"])
     except Exception as e:
         print(f"OpenAlex error: {e}", file=sys.stderr)
 
-    return None
+    return candidates
 
 
 def scrape_pdf_links_from_html(html, base_url):
@@ -657,25 +655,13 @@ def process_zotero_item(item):
         if download_pdf_with_curl(doi_url, target_pdf):
             pdf_saved = True
 
-    # 5d. Unpaywall (Open Access directe)
+    # 5d. Unpaywall i repositoris institucionals OA (multi-repositori)
     if not pdf_saved and doi:
-        unpaywall_url = find_unpaywall_pdf(doi)
-        if unpaywall_url:
-            if download_pdf_with_curl(unpaywall_url, target_pdf):
+        oa_candidates = find_unpaywall_pdfs(doi)
+        for oa_url in oa_candidates:
+            if download_pdf_with_curl(oa_url, target_pdf):
                 pdf_saved = True
-
-    # 5e. OpenAlex (Open Access alternatiu)
-    if not pdf_saved and doi:
-        try:
-            oa_url = f"https://api.openalex.org/works/https://doi.org/{doi}"
-            req = Request(oa_url, headers=HEADERS)
-            with urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                pdf_oa = data.get("open_access", {}).get("oa_url") or data.get("primary_location", {}).get("pdf_url")
-                if pdf_oa and download_pdf_with_curl(pdf_oa, target_pdf):
-                    pdf_saved = True
-        except Exception:
-            pass
+                break
 
     # 5g. Detecció a ~/Downloads (per si l'usuari l'ha baixat abans o manualment)
     if not pdf_saved:

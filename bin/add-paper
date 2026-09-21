@@ -790,13 +790,15 @@ def scrape_pdf_links_from_html(html, base_url):
             resolved.append(full_url)
     return resolved
 
-def find_pdf_url(doi, direct_pdf=None):
-    """Localitza la URL de descàrrega directa del PDF (Unpaywall multi-repositori, OpenAlex i metadades)."""
+def find_pdf_urls(doi, direct_pdf=None):
+    """Localitza les URLs de descàrrega directa del PDF (Unpaywall multi-repositori, OpenAlex i metadades)."""
     if direct_pdf:
-        return direct_pdf
+        return [direct_pdf]
         
     if not doi:
-        return None
+        return []
+
+    candidates = []
 
     # 1. Consultar Unpaywall (tots els repositoris institucionals OA)
     try:
@@ -804,18 +806,15 @@ def find_pdf_url(doi, direct_pdf=None):
         req = Request(unpaywall_url, headers=HEADERS)
         with urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            # 1a. Millor ubicació OA
-            best = data.get("best_oa_location")
-            if best and best.get("url_for_pdf"):
-                return best["url_for_pdf"]
-            if best and best.get("url") and best["url"].lower().endswith(".pdf"):
-                return best["url"]
-            # 1b. Qualsevol altra ubicació OA (repositoris universitaris, preprint, PMC, Zenodo...)
+            best = data.get("best_oa_location") or {}
+            if best.get("url_for_pdf"):
+                candidates.append(best["url_for_pdf"])
+            elif best.get("url"):
+                candidates.append(best["url"])
             for loc in data.get("oa_locations", []):
-                if loc.get("url_for_pdf"):
-                    return loc["url_for_pdf"]
-                if loc.get("url") and loc["url"].lower().endswith(".pdf"):
-                    return loc["url"]
+                u = loc.get("url_for_pdf") or loc.get("url")
+                if u and u not in candidates:
+                    candidates.append(u)
     except Exception as e:
         print(f"Unpaywall: {e}", file=sys.stderr)
 
@@ -826,18 +825,16 @@ def find_pdf_url(doi, direct_pdf=None):
         with urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             best_loc = data.get("best_oa_location") or {}
-            if best_loc.get("pdf_url"):
-                return best_loc["pdf_url"]
+            if best_loc.get("pdf_url") and best_loc["pdf_url"] not in candidates:
+                candidates.append(best_loc["pdf_url"])
             prim_loc = data.get("primary_location") or {}
-            if prim_loc.get("pdf_url"):
-                return prim_loc["pdf_url"]
+            if prim_loc.get("pdf_url") and prim_loc["pdf_url"] not in candidates:
+                candidates.append(prim_loc["pdf_url"])
             for loc in data.get("locations", []):
-                if loc.get("pdf_url"):
-                    return loc["pdf_url"]
-            if data.get("open_access", {}).get("oa_url"):
-                oa_u = data["open_access"]["oa_url"]
-                if oa_u and oa_u.lower().endswith(".pdf"):
-                    return oa_u
+                if loc.get("pdf_url") and loc["pdf_url"] not in candidates:
+                    candidates.append(loc["pdf_url"])
+            if data.get("open_access", {}).get("oa_url") and data["open_access"]["oa_url"] not in candidates:
+                candidates.append(data["open_access"]["oa_url"])
     except Exception as e:
         print(f"OpenAlex OA: {e}", file=sys.stderr)
         
@@ -847,13 +844,19 @@ def find_pdf_url(doi, direct_pdf=None):
         req = Request(landing_url, headers=HEADERS)
         with urlopen(req, timeout=12) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
-        candidates = scrape_pdf_links_from_html(html, landing_url)
-        if candidates:
-            return candidates[0]
+        scraped = scrape_pdf_links_from_html(html, landing_url)
+        for sc in scraped:
+            if sc not in candidates:
+                candidates.append(sc)
     except Exception as e:
         print(f"Landing page scrape: {e}", file=sys.stderr)
         
-    return None
+    return candidates
+
+def find_pdf_url(doi, direct_pdf=None):
+    """Versió de compatibilitat: retorna el primer candidat."""
+    cands = find_pdf_urls(doi, direct_pdf)
+    return cands[0] if cands else None
 
 def download_pdf_playwright(url, target_path):
     """Fallback per descarregar PDFs protegits per Cloudflare/Fastly amb navegador headless."""
@@ -1138,12 +1141,14 @@ def process_paper_by_doi(doi, direct_pdf=None, abstract=None):
             print(f"⬇️ Provant resolució de pàgina DOI ({doi_url})...")
             pdf_saved = download_pdf(doi_url, target_pdf)
             
-        # 3. Consulta a la base de dades Unpaywall
+        # 3. Consulta a la base de dades Unpaywall i repositoris institucionals OA
         if not pdf_saved:
-            unpaywall_url = find_pdf_url(doi)
-            if unpaywall_url:
-                print(f"⬇️ Provant Unpaywall ({unpaywall_url[:65]}...)...")
-                pdf_saved = download_pdf(unpaywall_url, target_pdf)
+            oa_candidates = find_pdf_urls(doi)
+            for cand_url in oa_candidates:
+                print(f"⬇️ Provant repositori OA ({cand_url[:65]}...)...")
+                if download_pdf(cand_url, target_pdf):
+                    pdf_saved = True
+                    break
             
         # 4. Fallback a ~/Downloads (protecció Cloudflare/MDPI/ScienceDirect)
         if not pdf_saved:
@@ -1516,9 +1521,11 @@ def process_paper_input(raw_input, direct_pdf=None):
                 doi_url = f"https://doi.org/{paper.doi}"
                 pdf_saved = download_pdf(doi_url, target_pdf)
                 if not pdf_saved:
-                    unpaywall_url = find_pdf_url(paper.doi)
-                    if unpaywall_url:
-                        pdf_saved = download_pdf(unpaywall_url, target_pdf)
+                    clean_doi = paper.doi.replace("https://doi.org/", "").strip()
+                    for unpaywall_url in find_pdf_urls(clean_doi):
+                        if download_pdf(unpaywall_url, target_pdf):
+                            pdf_saved = True
+                            break
 
             # Fallback intel·ligent: comprovar a ~/Downloads
             if not pdf_saved:
