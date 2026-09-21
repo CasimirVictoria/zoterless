@@ -649,7 +649,8 @@ def clean_latex(text):
 
 def clean_author_surname(first_author):
     """Extreu el primer cognom de forma neta evitant partícules ('de', 'la', 'van') i normalitzant accents."""
-    raw = first_author.split(',')[0].strip() if ',' in first_author else first_author.split(' and ')[0].strip()
+    has_comma = ',' in first_author
+    raw = first_author.split(',')[0].strip() if has_comma else first_author.split(' and ')[0].strip()
     raw = re.sub(r'[\{\}\\]', '', raw).strip()
     raw = strip_accents(raw)
     parts = raw.split()
@@ -657,11 +658,14 @@ def clean_author_surname(first_author):
     while parts and parts[0].lower() in particles:
         parts.pop(0)
     if parts:
-        # Si el darrer element és una inicial (format PubMed 'Cognom Inicials', ex. 'Baião D' o 'Smith J')
-        if len(parts) > 1 and len(parts[-1]) <= 2:
-            last_name = parts[-2].lower()
-        else:
+        if has_comma:
             last_name = parts[0].lower()
+        else:
+            # Format sense coma "Nom Cognom" o "Nom Cognom1 Cognom2" o "Cognom Inicials"
+            if len(parts) > 1 and len(parts[-1]) <= 2:
+                last_name = parts[-2].lower()
+            else:
+                last_name = parts[-1].lower()
     else:
         last_name = "desconegut"
     return re.sub(r'[^a-z\-]', '', last_name) or "desconegut"
@@ -910,15 +914,10 @@ def check_and_import_from_downloads(target_path, title="", doi="", pmid=""):
     now = time.time()
     target_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Paraules clau significatives del títol evitant termes genèrics biomèdics
-    stopwords = {
-        "with", "from", "that", "this", "study", "review", "their", "into", "journal",
-        "clinical", "health", "disease", "prevention", "human", "effect", "effects",
-        "role", "analysis", "system", "potential", "based", "using", "about", "between",
-        "approach", "perspective", "comprehensive"
-    }
-    title_words = [w.lower() for w in re.findall(r"[a-zA-Z]{4,}", title or "") if w.lower() not in stopwords]
     doi_clean = re.sub(r"[^a-zA-Z0-9]", "", doi.split("/")[-1] if "/" in doi else doi).lower()
+    clean_full_title = re.sub(r"[^a-z0-9]", "", strip_accents(title).lower()) if title else ""
+    main_title = re.split(r"[:\-\?]", title)[0].strip() if title else ""
+    clean_main_title = re.sub(r"[^a-z0-9]", "", strip_accents(main_title).lower()) if main_title else ""
 
     for p in downloads_dir.glob("*.pdf"):
         try:
@@ -926,21 +925,27 @@ def check_and_import_from_downloads(target_path, title="", doi="", pmid=""):
             if now - mtime > 28800: # 8 hores
                 continue
 
-            fname_clean = re.sub(r"[^a-zA-Z0-9]", "", p.name).lower()
+            fname_clean = re.sub(r"[^a-zA-Z0-9]", "", strip_accents(p.name).lower())
             
             # 1. Coincidència de nom amb DOI o PMID
-            if (pmid and str(pmid) in p.name) or (doi_clean and len(doi_clean) > 4 and doi_clean in fname_clean):
+            if (pmid and str(pmid) in fname_clean) or (doi_clean and len(doi_clean) > 4 and doi_clean in fname_clean):
                 print(f"📥 PDF trobat a Descàrregues per nom: {p.name}")
                 shutil.copy2(p, target_path)
                 return True
 
-            # 2. Coincidència de text al contingut (primera pàgina)
-            if len(title_words) >= 2:
+            # 2. Coincidència de nom de fitxer amb el títol (ex: Dialnet-CreativityAndArtificialIntelligence...)
+            if len(clean_main_title) >= 12 and clean_main_title[:20] in fname_clean:
+                print(f"📥 PDF trobat a Descàrregues per títol al nom: {p.name}")
+                shutil.copy2(p, target_path)
+                return True
+
+            # 3. Coincidència estricta de frase al contingut de la primera pàgina
+            if len(clean_main_title) >= 12:
                 res = subprocess.run(["pdftotext", "-l", "1", str(p), "-"], capture_output=True, text=True, timeout=2)
                 if res.returncode == 0:
-                    text_lower = res.stdout.lower()
-                    matches = sum(1 for w in title_words if w in text_lower)
-                    if matches >= 3 and (matches / len(title_words) >= 0.5):
+                    clean_pdf = re.sub(r"[^a-z0-9]", "", strip_accents(res.stdout).lower())
+                    if (clean_full_title and len(clean_full_title) >= 15 and clean_full_title in clean_pdf) or \
+                       (clean_main_title in clean_pdf):
                         print(f"📥 PDF trobat a Descàrregues pel contingut: {p.name}")
                         shutil.copy2(p, target_path)
                         return True
@@ -1031,13 +1036,16 @@ def process_paper_by_doi(doi, direct_pdf=None, abstract=None):
     if not final_abstract:
         final_abstract = fetch_abstract_from_openalex(doi)
     
-    if key_exists_in_bib(citekey, BIB_FILE):
+    already_in_bib = key_exists_in_bib(citekey, BIB_FILE)
+    target_pdf = PDF_DIR / f"{citekey}.pdf"
+    note_path = NOTES_DIR / f"@{citekey}.md"
+
+    if already_in_bib and target_pdf.is_file() and note_path.is_file():
         msg = f"ℹ️ L'article ja existeix a la biblioteca: @{citekey}"
         notify("Biblioteca", msg)
         print(msg)
         return True
         
-    target_pdf = PDF_DIR / f"{citekey}.pdf"
     pdf_saved = False
     if target_pdf.is_file():
         pdf_saved = True
@@ -1065,7 +1073,29 @@ def process_paper_by_doi(doi, direct_pdf=None, abstract=None):
         if not pdf_saved:
             pdf_saved = check_and_import_from_downloads(target_pdf, title=title, doi=doi)
             
-    format_and_append_bibtex(raw_bib, citekey, target_pdf, BIB_FILE)
+    if not already_in_bib:
+        format_and_append_bibtex(raw_bib, citekey, target_pdf, BIB_FILE)
+    elif pdf_saved and BIB_FILE.exists():
+        # Assegurar que el camp file = {...} està actualitzat a biblioteca.bib
+        try:
+            bib_text = BIB_FILE.read_text(encoding="utf-8")
+            if f"{{{citekey}," in bib_text and str(target_pdf) not in bib_text:
+                if "file =" in bib_text:
+                    bib_text_nou = re.sub(
+                        rf'(@\w+\s*\{{\s*{re.escape(citekey)},[\s\S]*?file\s*=\s*\{{)[^}}]+(\}})',
+                        rf'\g<1>{str(target_pdf)}\g<2>',
+                        bib_text
+                    )
+                else:
+                    bib_text_nou = re.sub(
+                        rf'(@\w+\s*\{{\s*{re.escape(citekey)},)',
+                        rf'\g<1>\n  file = {{{str(target_pdf)}}},',
+                        bib_text
+                    )
+                BIB_FILE.write_text(bib_text_nou, encoding="utf-8")
+        except Exception as e_bib:
+            print(f"Avís actualitzant fitxer bib: {e_bib}", file=sys.stderr)
+
     create_initial_note(citekey, title, author, year, NOTES_DIR, abstract=final_abstract, doi=doi)
     
     if pdf_saved:
@@ -1136,24 +1166,28 @@ def process_paper_input(raw_input, direct_pdf=None):
         first_author = authors[0] if authors else "Desconegut"
         citekey = generate_citekey(first_author, title, year)
         
-        if key_exists_in_bib(citekey, BIB_FILE):
+        already_in_bib = key_exists_in_bib(citekey, BIB_FILE)
+        target_pdf = PDF_DIR / f"{citekey}.pdf"
+        note_path = NOTES_DIR / f"@{citekey}.md"
+        
+        if already_in_bib and target_pdf.is_file() and note_path.is_file():
             notify("Biblioteca", f"ℹ️ L'article ja existeix a la biblioteca:\n@{citekey}")
             print(f"ℹ️ L'article ja existeix a la biblioteca: @{citekey}")
             return
             
-        target_pdf = PDF_DIR / f"{citekey}.pdf"
         pdf_saved = False
         if target_pdf.is_file():
             pdf_saved = True
         elif pdf_url:
             pdf_saved = download_pdf(pdf_url, target_pdf)
             
-        if raw_bib:
-            format_and_append_bibtex(raw_bib, citekey, target_pdf, BIB_FILE)
-        else:
-            bib_entry = build_bibtex_from_dict(citekey, meta, target_pdf)
-            with open(BIB_FILE, "a", encoding="utf-8") as f:
-                f.write(f"\n{bib_entry}\n")
+        if not already_in_bib:
+            if raw_bib:
+                format_and_append_bibtex(raw_bib, citekey, target_pdf, BIB_FILE)
+            else:
+                bib_entry = build_bibtex_from_dict(citekey, meta, target_pdf)
+                with open(BIB_FILE, "a", encoding="utf-8") as f:
+                    f.write(f"\n{bib_entry}\n")
                 
         create_initial_note(citekey, title, authors, year, NOTES_DIR, abstract=meta.get("abstract", ""))
         pdf_status = "📄 PDF desat" if pdf_saved else "⚠️ Sense PDF automàtic"
@@ -1221,7 +1255,16 @@ def process_paper_input(raw_input, direct_pdf=None):
                         clean_title = re.sub(r'[^a-zA-Z0-9]', '', paper.title)[:15]
                         citekey = f"paper_{clean_title}{year}"
 
+            already_in_bib = key_exists_in_bib(citekey, BIB_FILE)
             target_pdf = PDF_DIR / f"{citekey}.pdf"
+            note_path = NOTES_DIR / f"@{citekey}.md"
+            if already_in_bib and target_pdf.is_file() and note_path.is_file():
+                is_bio = "biomcp" in paper.source.lower() or (paper.extra and paper.extra.get("pmid"))
+                doc_type = "Norma BOE" if paper.source == "BOE" else "Norma DOGV" if paper.source == "DOGV" else "Article Mèdic" if is_bio else "Document"
+                notify("Biblioteca", f"ℹ️ {doc_type} ja existeix a la biblioteca:\n@{citekey}")
+                print(f"ℹ️ {doc_type} ja existeix a la biblioteca: @{citekey}")
+                return
+
             pdf_saved = False
             final_pdf_url = direct_pdf or paper.pdf_url
             if target_pdf.is_file():
@@ -1242,9 +1285,29 @@ def process_paper_input(raw_input, direct_pdf=None):
                 pmid_val = paper.extra.get("pmid") if (paper.extra and isinstance(paper.extra, dict)) else None
                 pdf_saved = check_and_import_from_downloads(target_pdf, title=paper.title, doi=paper.doi, pmid=pmid_val)
 
-            bib_entry = paper_to_bibtex(paper, citekey=citekey, target_pdf_path=str(target_pdf) if pdf_saved else None)
-            with open(BIB_FILE, "a", encoding="utf-8") as f:
-                f.write(f"\n{bib_entry}\n")
+            if not already_in_bib:
+                bib_entry = paper_to_bibtex(paper, citekey=citekey, target_pdf_path=str(target_pdf) if pdf_saved else None)
+                with open(BIB_FILE, "a", encoding="utf-8") as f:
+                    f.write(f"\n{bib_entry}\n")
+            elif pdf_saved and BIB_FILE.exists():
+                try:
+                    bib_text = BIB_FILE.read_text(encoding="utf-8")
+                    if f"{{{citekey}," in bib_text and str(target_pdf) not in bib_text:
+                        if "file =" in bib_text:
+                            bib_text_nou = re.sub(
+                                rf'(@\w+\s*\{{\s*{re.escape(citekey)},[\s\S]*?file\s*=\s*\{{)[^}}]+(\}})',
+                                rf'\g<1>{str(target_pdf)}\g<2>',
+                                bib_text
+                            )
+                        else:
+                            bib_text_nou = re.sub(
+                                rf'(@\w+\s*\{{\s*{re.escape(citekey)},)',
+                                rf'\g<1>\n  file = {{{str(target_pdf)}}},',
+                                bib_text
+                            )
+                        BIB_FILE.write_text(bib_text_nou, encoding="utf-8")
+                except Exception as e_bib:
+                    print(f"Avís actualitzant fitxer bib: {e_bib}", file=sys.stderr)
 
             create_initial_note(
                 citekey,
