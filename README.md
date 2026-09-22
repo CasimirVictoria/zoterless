@@ -229,14 +229,14 @@ Quan un article pertany a una editorial sota subscripció (ScienceDirect, Spring
 
 ## 🧬 Ecosistema i Integració: zoterless + Faristol + mcp-server-academic-spain
 
-`zoterless` està dissenyat segons la **filosofia UNIX: fes una sola cosa i fes-la a la perfecció**. En lloc de convertir-se en un monòlit que ho faça tot, s'integra de forma nativa i desacoblada amb **[Faristol](https://github.com/CasimirVictoria/faristol)** (el banc de treball de lectura, anotació de PDFs i notes bibliogràfiques) i amb **[mcp-server-academic-spain](https://github.com/CasimirVictoria/mcp-server-academic-spain)** (el servidor MCP de cerca acadèmica federada en 18 bases de dades):
+`zoterless` està dissenyat segons la **filosofia UNIX: fes una sola cosa i fes-la a la perfecció**. En lloc de convertir-se en un monòlit que ho faça tot, s'integra de forma nativa i desacoblada amb **[Faristol](https://github.com/CasimirVictoria/faristol)** (el banc de treball de lectura, anotació de PDFs i notes bibliogràfiques) i amb **[mcp-server-academic-spain](https://github.com/CasimirVictoria/mcp-server-academic-spain)** (el servidor MCP de cerca acadèmica federada en 35 bases de dades i repositoris):
 
 ```mermaid
 flowchart TD
     subgraph Ingesta ["CAPA D'INGESTA MULTICANAL"]
         Firefox["Firefox + Zotero Connector"] --> Receiver["zotero-receiver (Port 23119)"]
         CLI["add-paper (CLI multilingüe Argos)"]
-        MCP["mcp-server-academic-spain (18 bases de dades / IA)"]
+        MCP["mcp-server-academic-spain (35 bases de dades / IA)"]
     end
 
     subgraph Truth ["FONT DE VERITAT (Text Pla Estàndard)"]
@@ -260,6 +260,17 @@ flowchart TD
     Truth <--> Kate
 ```
 
+### 🔄 El Cicle Virtuós del Motor Compartit: Una Sola Font de Veritat
+
+Un dels avantatges arquitectònics més potents d'aquest ecosistema és que **la intel·ligència de cerca, extracció de metadades i descàrrega en accés obert mai no es duplica**:
+
+1. **El motor és únic:** `add-paper` importa directament les llibreries del motor unificat de `mcp-server-academic-spain` (`platforms.engine`).
+2. **Propagació instantània de millores:** Quan trobem i resolem un cas límit al motor (com esquivar el repte antibot de *Cloudflare/Fastly* d'editorials com Springer rastrejant rèpliques a repositoris universitaris d'Unpaywall/OpenAlex, o afegir nous cercadors com DOAJ, DBLP, DOGV, Recolecta o BioMCP):
+   - **L'agent d'IA (Antigravity/Claude/Cursor)** gaudeix immediatament de la millora durant les sessions de recerca.
+   - **La línia de comandes (`add-paper`)** n'obté el benefici automàticament sense tocar cap línia de codi.
+   - **Faristol Web** veu reflectida la nova capacitat a la pestanya de cerca sense haver de modificar la seua interfície.
+3. **Validació contínua (*Dogfooding*):** La recerca assistida per IA posa a prova diàriament els 35 connectors contra canvis en llocs web i restriccions d'accés; cada cop que afinem el motor, tot el teu escriptori local de treball queda automàticament reforçat.
+
 ### Com es comuniquen els projectes:
 
 1. **Font de veritat única en text pla:**
@@ -267,9 +278,9 @@ flowchart TD
 2. **Ingesta transparent per a Faristol:**
    - Quan fas clic a la icona de Zotero Connector a Firefox, `zotero-receiver` processa la descàrrega, genera la referència BibTeX i crea la nota `@citekey.md`. Quan obris o recarregues `Faristol`, tant el PDF com la seua nota d'estudi apareixen a l'instant llestos per a la lectura.
 3. **Cerca i importació des de Faristol:**
-   - La interfície web de `Faristol` incorpora la pestanya **[ 🌐 Cerca ]** connectada a `mcp-server-academic-spain` i a `add-paper`: permet cercar en 18 bases de dades i, amb el botó d'importació en un sol clic, cridar `add-paper --pdf-url` per afegir el document automàticament a la biblioteca.
+   - La interfície web de `Faristol` incorpora la pestanya **[ 🌐 Cerca ]** connectada a `mcp-server-academic-spain` i a `add-paper`: permet cercar en 35 bases de dades i, amb el botó d'importació en un sol clic, cridar `add-paper --pdf-url` per afegir el document automàticament a la biblioteca.
 4. **Pont d'Intel·ligència Artificial (`mcp-server-academic-spain`):**
-   - El servidor MCP permet a qualsevol agent d'IA cercar en 18 bases de dades i desar directament articles a la biblioteca local `zoterless` i `Faristol`.
+   - El servidor MCP permet a qualsevol agent d'IA cercar en 35 bases de dades i desar directament articles a la biblioteca local `zoterless` i `Faristol`.
 5. **Zero dependència mútua (*No vendor lock-in*):**
    - Si Faristol no està obert, `zoterless` funciona al 100% de la seua potència. Si `zoterless` actualitza un fitxer, Faristol i Kate el detecten a l'instant.
 
