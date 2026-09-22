@@ -306,12 +306,23 @@ Aquest projecte és un tribut sincer al programari lliure i s'alça directament 
 - A l'autor de **Better Notes**, per mostrar el camí cap a la integració atòmica entre literatura acadèmica i notes en Markdown.
 - Als projectes de ciència oberta i eines lliures: **OpenAlex**, **Crossref**, **ERIC (IES)**, **Dialnet**, **Unpaywall** i **Argos Translate**.
 
-### 🤖 Autoria i Desenvolupament
+---
+
+## ⚠️ Avís de Responsabilitat i Projecte Personal
+
+Aquest és un **projecte personal**, dissenyat artesanalment per donar resposta a un flux de treball concret de recerca acadèmica i gestió bibliogràfica:
+- **Sense garanties (*AS-IS*):** Distribuït sota llicència MIT de manera lliure i comunitària, «tal com és», sense cap garantia explícita ni implícita.
+- **Exempció de responsabilitat:** L'autor no es fa responsable de cap possible pèrdua d'informació, alteració de fitxers, fallades del sistema, incompatibilitats, danys directes o indirectes derivats de l'execució d'aquests scripts o dimonis. **L'usuari ha de mantindre sempre còpies de seguretat periòdiques dels seus fitxers de notes (`notes/`), PDFs (`pdfs/`) i de la base de dades bibliogràfica (`biblioteca.bib`).**
+- **Condicions d'accés:** L'ús de les eines de descàrrega i el compliment estricte de les condicions d'accés i termes de servei de cada portal editorial o repositori acadèmic és responsabilitat exclusiva de l'usuari.
+
+---
+
+## 🤖 Autoria i Desenvolupament amb Antigravity CLI
 
 - **Concepció, visió del flux i necessitats d'investigació:** Casimir Victoria (@CasimirVictoria).
-- **Implementació tècnica i desenvolupament del codi:** Creat i afinat en programació en parella (*pair programming*) amb l'agent d'intel·ligència artificial **Antigravity** de Google DeepMind.
+- **Arquitectura i implementació del codi:** Creat, programat i afinat íntegrament en programació en parella (*pair programming*) emprant l'agent d'intel·ligència artificial **Antigravity CLI** (`agy`) de Google DeepMind.
 
-> *"Aquest programari ha nascut de la necessitat pràctica d'un flux de treball acadèmic fluid, sobirà i basat estrictament en text pla. Jo he aportat les idees, l'experiència d'usuari i la direcció del disseny; la programació i la implementació tècnica del codi han estat dutes a terme per Antigravity."* — Casimir Victoria
+> *"Aquest programari ha nascut de la necessitat pràctica d'un flux de treball acadèmic fluid, sobirà i basat estrictament en text pla. Jo he aportat les idees, l'experiència d'usuari i la direcció del disseny; la programació i la implementació tècnica del codi han estat dutes a terme amb Antigravity CLI."* — Casimir Victoria
 
 ---
 
