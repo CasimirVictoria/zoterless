@@ -478,6 +478,23 @@ def append_or_update_bib(citekey, item_type, fields, bib_file):
                 new_content = content[:m.start()] + new_block + "}" + content[m.end():]
                 bib_file.write_text(new_content, encoding="utf-8")
 
+_recent_saves_lock = threading.Lock()
+_recent_saves = {}
+
+def should_process_url(url):
+    """Evita processar dues vegades seguides la mateixa URL si el connector envia múltiples esdeveniments."""
+    if not url:
+        return True
+    now = time.time()
+    with _recent_saves_lock:
+        for u in list(_recent_saves.keys()):
+            if now - _recent_saves[u] > 30:
+                del _recent_saves[u]
+        if url in _recent_saves:
+            return False
+        _recent_saves[url] = now
+        return True
+
 def process_zotero_item(item):
     """Processa un element rebut des de Zotero Connector i el desa a la biblioteca."""
     raw_title = item.get("title", "")
@@ -677,11 +694,13 @@ def process_zotero_item(item):
 
     # 5h. Captura de pàgina web / article a PDF net via Trafilatura + Pandoc/XeLaTeX (sense Chromium)
     web_article_text = ""
-    if not pdf_saved and item_url and item_url.startswith("http"):
+    if not pdf_saved and (item_url.startswith("http") or item.get("html")):
         try:
             import trafilatura
-            downloaded = trafilatura.fetch_url(item_url)
-            if not downloaded:
+            downloaded = item.get("html") or ""
+            if not downloaded and item_url.startswith("http"):
+                downloaded = trafilatura.fetch_url(item_url)
+            if not downloaded and item_url.startswith("http"):
                 res = subprocess.run([
                     "curl", "-sL", "-A", HEADERS["User-Agent"], item_url
                 ], capture_output=True, text=True, timeout=15)
@@ -696,7 +715,7 @@ def process_zotero_item(item):
                     include_tables=True,
                     include_images=False
                 )
-                if article_md and len(article_md.strip()) > 100:
+                if article_md and len(article_md.strip()) > 80:
                     web_article_text = article_md.strip()
                     if (not title or title == "Sense títol") and meta and meta.title:
                         title = meta.title
@@ -716,29 +735,42 @@ def process_zotero_item(item):
                                     if len(parts) >= 3:
                                         author_str = parts[-2]
                     
+                    if (not author_str or author_str == "Desconegut") and meta and meta.sitename:
+                        author_str = meta.sitename
+
+                    if not year:
+                        if meta and meta.date:
+                            ym = re.search(r'\b(19\d\d|20\d\d)\b', str(meta.date))
+                            if ym:
+                                year = ym.group(1)
+                        if not year and item_url:
+                            ym_url = re.search(r'/(19\d\d|20\d\d)/', item_url)
+                            if ym_url:
+                                year = ym_url.group(1)
+
                     if author_str and author_str != "Desconegut":
                         new_surname = clean_author_surname(author_str)
-                        if first_author_lastname == "desconegut" and new_surname != "desconegut":
+                        if new_surname != "desconegut":
                             first_author_lastname = new_surname
-                            citekey = generate_citekey(first_author_lastname, title, year)
-                            target_pdf = PDF_DIR / f"{citekey}.pdf"
+                    
+                    citekey = generate_citekey(first_author_lastname, title, year)
+                    target_pdf = PDF_DIR / f"{citekey}.pdf"
 
                     if not journal and meta and meta.sitename:
                         journal = meta.sitename
 
-
-                    doc_title = title.replace('"', '\\"')
-                    doc_author = author_str.replace('"', '\\"')
+                    doc_title = clean_latex(title).replace('\n', ' ').strip()
+                    doc_author = clean_latex(author_str).replace('\n', ' ').strip()
                     if meta and meta.sitename and meta.sitename not in doc_author:
-                        doc_author = f"{doc_author} ({meta.sitename})"
+                        doc_author = f"{doc_author} ({clean_latex(meta.sitename)})"
                     doc_date = str(year) if year else ""
                     if meta and meta.date:
                         doc_date = str(meta.date)
 
                     pdf_md = f"""---
-title: "{doc_title}"
-author: "{doc_author}"
-date: "{doc_date}"
+title: {json.dumps(doc_title)}
+author: {json.dumps(doc_author)}
+date: {json.dumps(doc_date)}
 geometry: "paperwidth=170mm,paperheight=240mm,top=1.8cm,bottom=1.8cm,left=1.8cm,right=1.8cm"
 fontsize: 11pt
 linestretch: 1.18
@@ -757,7 +789,7 @@ mainfont: "DejaVu Serif"
                         "pandoc", str(tmp_md),
                         "-o", str(target_pdf),
                         "--pdf-engine=xelatex"
-                    ], capture_output=True, text=True, timeout=35)
+                    ], capture_output=True, text=True, timeout=45)
                     if res.returncode == 0 and target_pdf.is_file() and target_pdf.stat().st_size > 500:
                         pdf_saved = True
                     try:
@@ -774,6 +806,10 @@ mainfont: "DejaVu Serif"
     if not raw_abstract:
         raw_abstract = item.get("abstractNote", "") or item.get("abstract", "")
     abstract_clean = re.sub(r'<[^>]+>', '', str(raw_abstract)).strip() if raw_abstract else ""
+    if not abstract_clean and web_article_text:
+        paras = [p.strip() for p in web_article_text.split('\n\n') if len(p.strip()) > 30 and not p.strip().startswith('#')]
+        if paras:
+            abstract_clean = paras[0][:400]
 
     fields = {
         "title": title,
@@ -798,12 +834,15 @@ mainfont: "DejaVu Serif"
         extra_article_section = ""
         if web_article_text:
             extra_article_section = f"\n# Contingut de l'article\n\n{web_article_text}\n"
+        clean_doi = (doi or "").strip()
+        if clean_doi.lower() == "none":
+            clean_doi = ""
         note_content = f"""---
 title: "{clean_latex(title)}"
 author: "{clean_latex(author_str)}"
-year: {year}
+year: {year or '""'}
 citekey: "@{citekey}"
-doi: "{doi}"
+doi: "{clean_doi}"
 url: "{item_url}"
 tags: []
 ---
@@ -864,7 +903,7 @@ class ZoteroHandler(http.server.BaseHTTPRequestHandler):
                 "prefs": {
                     "downloadAssociatedFiles": True,
                     "reportActiveURL": True,
-                    "automaticSnapshots": False
+                    "automaticSnapshots": True
                 }
             }
             self.wfile.write(json.dumps(resp).encode("utf-8"))
@@ -876,7 +915,8 @@ class ZoteroHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         content_len = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_len).decode("utf-8", errors="ignore")
+        raw_body = self.rfile.read(content_len)
+        body = raw_body.decode("utf-8", errors="ignore")
         
         if "/connector/getSelectedCollection" in self.path:
             self.send_cors_headers(200)
@@ -891,7 +931,7 @@ class ZoteroHandler(http.server.BaseHTTPRequestHandler):
                 "prefs": {
                     "downloadAssociatedFiles": True,
                     "reportActiveURL": True,
-                    "automaticSnapshots": False
+                    "automaticSnapshots": True
                 }
             }
             self.wfile.write(json.dumps(resp).encode("utf-8"))
@@ -908,6 +948,80 @@ class ZoteroHandler(http.server.BaseHTTPRequestHandler):
                     threading.Thread(target=process_zotero_item, args=(it,), daemon=True).start()
             except Exception as e:
                 print(f"Error processant saveItems: {e}", file=sys.stderr)
+            return
+
+        if "/connector/saveSnapshot" in self.path:
+            self.send_cors_headers(201)
+            self.wfile.write(b'{"success":true,"id":1}')
+            try:
+                payload = json.loads(body) if body.strip() else {}
+                url = payload.get("url") or payload.get("uri") or ""
+                title = payload.get("title") or ""
+                html = payload.get("html") or payload.get("content") or ""
+                if not should_process_url(url):
+                    print(f"ℹ️ Zotero Connector: ignora duplicat recent de saveSnapshot per a {url}", file=sys.stderr)
+                    return
+                print(f"📥 Zotero Connector: rebut saveSnapshot per a {url or title}", file=sys.stderr)
+                item = {
+                    "itemType": "webpage",
+                    "title": title,
+                    "url": url,
+                    "html": html,
+                    "creators": payload.get("creators", []),
+                    "date": payload.get("date", "")
+                }
+                threading.Thread(target=process_zotero_item, args=(item,), daemon=True).start()
+            except Exception as e:
+                print(f"Error processant saveSnapshot: {e}", file=sys.stderr)
+            return
+
+        if "/connector/saveSingleFile" in self.path:
+            self.send_cors_headers(201)
+            self.wfile.write(b'{"success":true}')
+            try:
+                payload = json.loads(body) if body.strip() else {}
+                url = payload.get("url") or payload.get("uri") or ""
+                title = payload.get("title") or ""
+                snapshot_content = payload.get("snapshotContent") or payload.get("html") or ""
+                if url and snapshot_content:
+                    if not should_process_url(url):
+                        print(f"ℹ️ Zotero Connector: ignora duplicat recent de saveSingleFile per a {url}", file=sys.stderr)
+                        return
+                    print(f"📥 Zotero Connector: rebut saveSingleFile per a {url}", file=sys.stderr)
+                    item = {
+                        "itemType": "webpage",
+                        "title": title,
+                        "url": url,
+                        "html": snapshot_content,
+                        "date": payload.get("date", "")
+                    }
+                    threading.Thread(target=process_zotero_item, args=(item,), daemon=True).start()
+            except Exception as e:
+                print(f"Error processant saveSingleFile: {e}", file=sys.stderr)
+            return
+
+        if "/connector/saveStandaloneAttachment" in self.path:
+            self.send_cors_headers(201)
+            self.wfile.write(b'{"success":true}')
+            try:
+                meta_header = self.headers.get("X-Metadata", "{}")
+                meta = json.loads(meta_header)
+                url = meta.get("url", "")
+                title = meta.get("title", "")
+                content_type = meta.get("contentType", "")
+                if raw_body.startswith(b"%PDF") or "pdf" in content_type.lower():
+                    print(f"📥 Zotero Connector: rebut PDF independent per a {url or title}", file=sys.stderr)
+                    tmp_pdf = Path(f"/tmp/standalone_{int(time.time()*1000)}.pdf")
+                    tmp_pdf.write_bytes(raw_body)
+                    item = {
+                        "itemType": "journalArticle",
+                        "title": title,
+                        "url": f"file://{tmp_pdf.resolve()}",
+                        "attachments": [{"url": f"file://{tmp_pdf.resolve()}", "mimeType": "application/pdf"}]
+                    }
+                    threading.Thread(target=process_zotero_item, args=(item,), daemon=True).start()
+            except Exception as e:
+                print(f"Error processant saveStandaloneAttachment: {e}", file=sys.stderr)
             return
 
         self.send_cors_headers(200)
