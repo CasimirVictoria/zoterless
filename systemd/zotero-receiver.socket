@@ -1,0 +1,10 @@
+[Unit]
+Description=Zotero Connector Receiver Socket (Port 23119)
+PartOf=zotero-receiver.service
+
+[Socket]
+ListenStream=127.0.0.1:23119
+Accept=no
+
+[Install]
+WantedBy=sockets.target

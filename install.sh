@@ -15,45 +15,35 @@ echo "🔍 Comprovant dependències..."
 for cmd in python3 curl pdftotext notify-send; do
     if ! command -v "$cmd" &>/dev/null; then
         echo "⚠️  Avís: L'ordre '$cmd' no s'ha trobat al sistema."
-        echo "   Pots instal·lar-la a Debian/Ubuntu amb: sudo apt install python3 python3-pyqt5 curl poppler-utils libnotify-bin"
+        echo "   Pots instal·lar-la a Debian/Ubuntu amb: sudo apt install python3 python3-pyqt6 curl poppler-utils libnotify-bin"
     fi
 done
 
-# 2. Instal·lar binaris
+# 2. Instal·lar binaris (symlinks per desenvolupament o còpies)
 mkdir -p "$BIN_DEST"
-for script in zotero-receiver kate-citar kate-citar-actions add-paper; do
+for script in zotero-receiver kate-citar kate-citar-actions add-paper kate-sync-project; do
     if [ -f "$DIR/bin/$script" ]; then
-        cp -f "$DIR/bin/$script" "$BIN_DEST/$script"
-        chmod +x "$BIN_DEST/$script"
-        echo "  ✓ $BIN_DEST/$script instal·lat"
+        ln -sf "$DIR/bin/$script" "$BIN_DEST/$script"
+        chmod +x "$DIR/bin/$script"
+        echo "  ✓ $BIN_DEST/$script enllaçat"
     fi
 done
 
-# 3. Instal·lar i activar servei systemd per a l'usuari
+# 3. Instal·lar i activar Systemd Socket Activation (Zero RAM real)
 mkdir -p "$SYSTEMD_DEST"
-cat > "$SYSTEMD_DEST/zotero-receiver.service" << EOF
-[Unit]
-Description=Zoterless Connector Daemon (Emulador de Zotero per a Firefox)
-After=network.target
-
-[Service]
-ExecStart=%h/.local/bin/zotero-receiver
-Restart=always
-RestartSec=3
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=default.target
-EOF
+cp -f "$DIR/systemd/zotero-receiver.socket" "$SYSTEMD_DEST/zotero-receiver.socket"
+cp -f "$DIR/systemd/zotero-receiver.service" "$SYSTEMD_DEST/zotero-receiver.service"
 
 systemctl --user daemon-reload
-systemctl --user enable --now zotero-receiver.service
+systemctl --user stop zotero-receiver.service 2>/dev/null || true
+systemctl --user enable --now zotero-receiver.socket
 
 echo ""
-echo "🎉 zoterless s'ha instal·lat correctament!"
+echo "🎉 zoterless s'ha instal·lat correctament amb Socket Activation!"
+echo "   (En repòs consumeix 0 MB de RAM; s'activa automàticament en rebre peticions de Firefox)"
 echo ""
-echo "Estat del servei:"
-systemctl --user status zotero-receiver.service --no-pager | head -n 8
+echo "Estat del socket:"
+systemctl --user status zotero-receiver.socket --no-pager | head -n 8
 echo ""
 echo "Per configurar el Zotero Connector a Firefox:"
 echo "1. Instal·la l'extensió oficial 'Zotero Connector' a Firefox."

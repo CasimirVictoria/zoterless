@@ -25,9 +25,9 @@ Per gaudir d'aquestes 4 funcionalitats essencials, havia de:
 
 ### ⚡ La Solució `zoterless`
 
-**`zoterless` aglutina i fon aquestes 4 peces en un sol dimoni autònom de ~24 MB en Python pur**, sense dependències opaques:
+**`zoterless` aglutina i fon aquestes 4 peces en un sol servei autònom de 0 MB de RAM en repòs (mitjançant Systemd Socket Activation)**, sense dependències opaques:
 
-- **100% Compatible amb Zotero Connector:** Continuem fent clic a la icona oficial del navegador a Firefox. L'extensió envia la petició HTTP al port local `23119`, i `zotero-receiver` li respon amb el protocol natiu de Zotero.
+- **100% Compatible amb Zotero Connector:** Continuem fent clic a la icona oficial del navegador a Firefox. L'extensió envia la petició HTTP al port local `23119`, i `zotero-receiver` s'activa instantàniament a demanda i li respon amb el protocol natiu de Zotero.
 - **Better BibTeX natiu:** Resolució de metadades canòniques via Crossref/DOI i escriptura directa a `~/Documents/Biblioteca/biblioteca.bib`.
 - **ZotMoov natiu:** Descàrrega directa de PDFs en accés obert (Unpaywall, Dialnet, DSpace) o escaneig automàtic a `~/Downloads`, reanomenant a `{citekey}.pdf` a la carpeta `pdfs/`.
 - **Better Notes natiu:** Creació immediata de la fitxa de recerca en Markdown amb frontmatter YAML a `~/Documents/notes/@{citekey}.md`.
@@ -39,12 +39,12 @@ Per gaudir d'aquestes 4 funcionalitats essencials, havia de:
 | La pila pesada anterior | L'alternativa zoterless | Què fa exactament? |
 | :--- | :--- | :--- |
 | **Zotero Connector** *(extensió navegador)* | **Zotero Connector** *(el mantenim!)* | Captura de metadades i PDFs al navegador en un sol clic. |
-| **Zotero Desktop** *(~500 MB RAM, SQLite, Gecko)* | **`zotero-receiver`** *(~24 MB RAM, 0% CPU)* | Servidor HTTP natiu en Python al port `23119` que atén el Connector. |
+| **Zotero Desktop** *(~500 MB RAM, SQLite, Gecko)* | **`zotero-receiver`** *(0 MB RAM en repòs via Socket Activation)* | Servidor HTTP natiu en Python activat a demanda al port `23119`. |
 | **Plugin Better BibTeX** *(motor JS intern)* | **Natiu a `zoterless`** | Citekeys canòniques (`autorTitolAny`) i escriptura a `biblioteca.bib`. |
 | **Plugins ZotMoov / ZotFile** *(reanomenar PDFs)* | **Natiu a `zoterless`** | Descàrrega directa d'Unpaywall o detecció automàtica a `~/Downloads`. |
 | **Plugins Better Notes / Markdown** | **Natiu a `zoterless`** | Creació immediata de la plantilla de notes a `notes/@{citekey}.md`. |
-| **VS Code + Extensions Zotero** *(cercador de cites)* | **`kate-citar`** *(PyQt5 natiu per a Kate)* | Cercador instantani de referències per inserir `@citekey` al cursor. |
-| **Visor de PDFs intern de Zotero** | **`kate-citar-actions` + Okular** | Obre el PDF associat a **Okular** i la nota a **Kate** amb una drecera. |
+| **VS Code + Extensions Zotero** *(cercador de cites)* | **`kate-citar`** *(PyQt6 natiu per a Kate a Plasma 6)* | Cercador instantani de referències per inserir `@citekey` al cursor. |
+| **Visor de PDFs intern de Zotero** | **`kate-citar-actions` + Okular** | Salt directe a la pàgina exacta i ressaltat de citació a Okular. |
 
 ---
 

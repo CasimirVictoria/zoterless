@@ -85,6 +85,15 @@ def is_eduvpn_active():
         pass
     return False
 
+def trigger_kate_sync():
+    """Sincronitza en segon pla el projecte de Kate per reflectir immediatament el nou article."""
+    try:
+        sync_cmd = shutil.which("kate-sync-project") or str(Path.home() / ".local/bin/kate-sync-project")
+        if Path(sync_cmd).is_file():
+            subprocess.Popen([sync_cmd, "--quiet"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
 def connect_eduvpn():
     """Intenta connectar la VPN institucional (EduVPN UV) mitjançant NetworkManager."""
     try:
@@ -858,7 +867,73 @@ def find_pdf_url(doi, direct_pdf=None):
     cands = find_pdf_urls(doi, direct_pdf)
     return cands[0] if cands else None
 
-def download_pdf_playwright(url, target_path):
+def is_valid_pdf_content(pdf_path, title="", abstract="", doi=""):
+    """Comprova si el fitxer PDF té contingut acadèmic real i no és un avís antibot / paywall."""
+    if not pdf_path.is_file():
+        return False, "El fitxer no existeix."
+    size = pdf_path.stat().st_size
+    if size < 1000:
+        return False, f"Mida massa petita ({size} bytes)."
+    try:
+        with open(pdf_path, "rb") as f:
+            header = f.read(10)
+        if not header.startswith(b"%PDF"):
+            return False, "Capçalera no correspon a PDF."
+    except Exception as e:
+        return False, f"Error llegint: {e}"
+
+    try:
+        res = subprocess.run(["pdftotext", "-l", "2", str(pdf_path), "-"], capture_output=True, text=True, timeout=3)
+        raw_text = res.stdout if res.returncode == 0 else ""
+    except Exception:
+        raw_text = ""
+
+    text_lower = raw_text.lower()
+    block_markers = [
+        "javascript is disabled in your browser",
+        "please enable javascript to proceed",
+        "a required part of this site couldn't load",
+        "attention required! | cloudflare",
+        "just a moment...",
+        "cf-browser-verification",
+        "access denied",
+        "403 forbidden",
+        "subscription required",
+        "purchase this article",
+        "institutional login",
+        "an error occurred while processing your request",
+    ]
+    for marker in block_markers:
+        if marker in text_lower:
+            return False, f"Bloqueig antibot: '{marker}'"
+
+    if len(raw_text.strip()) < 120 and size < 35000:
+        return False, "Text massa curt per a ser un article complet."
+
+    # 3. Comprovació de conflicte de DOI (si el PDF conté explícitament un altre DOI)
+    if doi and raw_text:
+        clean_target_doi = doi.lower().replace("https://doi.org/", "").strip()
+        pdf_dois = [d.rstrip(".,;)>]").lower() for d in re.findall(r"\b10\.\d{4,9}/[^\s\"<>]+", raw_text)]
+        if pdf_dois and not any(clean_target_doi == d or d in clean_target_doi for d in pdf_dois):
+            return False, f"El PDF conté un DOI diferent ({pdf_dois[0]}) al sol·licitat ({clean_target_doi})."
+
+    # 4. Validació de concordança amb l'abstract (si està disponible)
+    if abstract and len(abstract.strip()) > 60 and raw_text:
+        abs_words = set(re.findall(r'\b[a-zA-Z]{6,}\b', abstract.lower()))
+        stopwords = {"between", "through", "during", "without", "should", "further", "however", "results", "article", "present", "studies", "research"}
+        significant_abs_words = [w for w in abs_words if w not in stopwords]
+        
+        if len(significant_abs_words) >= 6:
+            matches = sum(1 for w in significant_abs_words if w in text_lower)
+            if matches == 0:
+                clean_full_title = "".join(c for c in unicodedata.normalize("NFKD", title.lower()) if c.isalnum()) if title else ""
+                clean_pdf_text = "".join(c for c in unicodedata.normalize("NFKD", text_lower) if c.isalnum())
+                if clean_full_title and len(clean_full_title) >= 15 and clean_full_title[:25] not in clean_pdf_text:
+                    return False, "El contingut del PDF no coincideix ni amb el títol ni amb les paraules clau de l'abstract."
+
+    return True, "PDF vàlid"
+
+def download_pdf_playwright(url, target_path, title="", abstract="", doi=""):
     """Fallback per descarregar PDFs protegits per Cloudflare/Fastly amb navegador headless."""
     venv_python = Path.home() / "Projects/mcp-server-academic-spain/venv/bin/python"
     if not venv_python.is_file():
@@ -888,8 +963,8 @@ asyncio.run(run())
     try:
         subprocess.run([str(venv_python), "-c", script], timeout=20, capture_output=True)
         if target_path.is_file() and target_path.stat().st_size > 1000:
-            data = target_path.read_bytes()[:10]
-            if data.startswith(b"%PDF"):
+            is_val, _ = is_valid_pdf_content(target_path, title=title, abstract=abstract, doi=doi)
+            if is_val:
                 return True
         if target_path.is_file():
             target_path.unlink()
@@ -897,7 +972,7 @@ asyncio.run(run())
         pass
     return False
 
-def download_pdf(pdf_url, target_path):
+def download_pdf(pdf_url, target_path, title="", abstract="", doi=""):
     """Descarrega el PDF amb curl, amb suport per seguir enllaços de visualització OJS, Dialnet i repositoris."""
     temp_target = target_path.with_suffix(".tmp")
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -912,14 +987,19 @@ def download_pdf(pdf_url, target_path):
         if temp_target.is_file():
             data = temp_target.read_bytes()
             if data.startswith(b"%PDF"):
-                temp_target.replace(target_path)
-                return True
+                is_val, _ = is_valid_pdf_content(temp_target, title=title, abstract=abstract, doi=doi)
+                if is_val:
+                    temp_target.replace(target_path)
+                    return True
+                else:
+                    temp_target.unlink()
+                    return False
                 
             # Detectar si és un bloqueig per bot challenge (com Fastly / Cloudflare)
             html = data.decode("utf-8", errors="ignore")
             if "Client Challenge" in html or "_fs_ch_st" in html or "cf-browser-verification" in html or "Just a moment..." in html:
                 temp_target.unlink()
-                if download_pdf_playwright(pdf_url, target_path):
+                if download_pdf_playwright(pdf_url, target_path, title=title, abstract=abstract, doi=doi):
                     return True
                 return False
                 
@@ -936,22 +1016,26 @@ def download_pdf(pdf_url, target_path):
                 if temp_target.is_file():
                     data2 = temp_target.read_bytes()
                     if data2.startswith(b"%PDF"):
-                        temp_target.replace(target_path)
-                        return True
+                        is_val, _ = is_valid_pdf_content(temp_target, title=title, abstract=abstract, doi=doi)
+                        if is_val:
+                            temp_target.replace(target_path)
+                            return True
+                        else:
+                            temp_target.unlink()
                         
         if temp_target.is_file():
             temp_target.unlink()
             
         # Fallback amb Playwright si curl no ha obtingut el PDF directe
-        if download_pdf_playwright(pdf_url, target_path):
+        if download_pdf_playwright(pdf_url, target_path, title=title, abstract=abstract, doi=doi):
             return True
     except Exception as e:
         print(f"Error descarregant el PDF: {e}", file=sys.stderr)
-        if download_pdf_playwright(pdf_url, target_path):
+        if download_pdf_playwright(pdf_url, target_path, title=title, abstract=abstract, doi=doi):
             return True
     return False
 
-def check_and_import_from_downloads(target_path, title="", doi="", pmid=""):
+def check_and_import_from_downloads(target_path, title="", abstract="", doi="", pmid=""):
     """
     Comprova si l'usuari ha descarregat el PDF manualment a ~/Downloads (p. ex. quan l'editorial
     utilitza Cloudflare o protecció antibot com MDPI, ScienceDirect, etc.).
@@ -991,6 +1075,11 @@ def check_and_import_from_downloads(target_path, title="", doi="", pmid=""):
             # Si el PDF de Downloads ja pertany a un altre document de la biblioteca, descartar-lo!
             p_bytes = p.read_bytes()
             if hashlib.md5(p_bytes).hexdigest() in existing_hashes:
+                continue
+
+            # Validar contingut real del PDF i concordança abans d'importar
+            is_valid, _ = is_valid_pdf_content(p, title=title, abstract=abstract, doi=doi)
+            if not is_valid:
                 continue
 
             fname_clean = re.sub(r"[^a-zA-Z0-9]", "", strip_accents(p.name).lower())
@@ -1089,6 +1178,7 @@ def create_initial_note(citekey, title, author, year, notes_dir, abstract="", do
     ])
     note_content = "\n".join(lines)
     note_path.write_text(note_content, encoding="utf-8")
+    trigger_kate_sync()
 
 def process_paper_by_doi(doi, direct_pdf=None, abstract=None):
     """Processa un article a partir del seu DOI canònic."""
@@ -1133,26 +1223,26 @@ def process_paper_by_doi(doi, direct_pdf=None, abstract=None):
         # 1. Enllaç directe si s'ha proporcionat (p. ex. Dialnet o OpenAlex oa_url)
         if direct_pdf:
             print(f"⬇️ Provant enllaç directe ({direct_pdf[:65]}...)...")
-            pdf_saved = download_pdf(direct_pdf, target_pdf)
+            pdf_saved = download_pdf(direct_pdf, target_pdf, title=title, abstract=final_abstract, doi=doi)
             
         # 2. Resolució i scraping directe de la pàgina web del DOI (com fa KBibTeX)
         if not pdf_saved:
             doi_url = f"https://doi.org/{doi}"
             print(f"⬇️ Provant resolució de pàgina DOI ({doi_url})...")
-            pdf_saved = download_pdf(doi_url, target_pdf)
+            pdf_saved = download_pdf(doi_url, target_pdf, title=title, abstract=final_abstract, doi=doi)
             
         # 3. Consulta a la base de dades Unpaywall i repositoris institucionals OA
         if not pdf_saved:
             oa_candidates = find_pdf_urls(doi)
             for cand_url in oa_candidates:
                 print(f"⬇️ Provant repositori OA ({cand_url[:65]}...)...")
-                if download_pdf(cand_url, target_pdf):
+                if download_pdf(cand_url, target_pdf, title=title, abstract=final_abstract, doi=doi):
                     pdf_saved = True
                     break
             
         # 4. Fallback a ~/Downloads (protecció Cloudflare/MDPI/ScienceDirect)
         if not pdf_saved:
-            pdf_saved = check_and_import_from_downloads(target_pdf, title=title, doi=doi)
+            pdf_saved = check_and_import_from_downloads(target_pdf, title=title, abstract=final_abstract, doi=doi)
             
     if not already_in_bib:
         format_and_append_bibtex(raw_bib, citekey, target_pdf, BIB_FILE)
@@ -1277,8 +1367,25 @@ def process_web_article(url):
         doc_author = f"{doc_author} ({journal})"
     doc_date = date_str or str(year)
 
+    block_markers = [
+        "javascript is disabled in your browser",
+        "please enable javascript to proceed",
+        "a required part of this site couldn't load",
+        "attention required! | cloudflare",
+        "just a moment...",
+        "cf-browser-verification",
+        "access denied",
+        "403 forbidden",
+        "subscription required",
+        "purchase this article",
+        "institutional login",
+        "an error occurred while processing your request",
+    ]
+    article_lower = (article_md or "").lower()
+    has_block_marker = any(marker in article_lower for marker in block_markers)
+
     pdf_saved = False
-    if article_md and len(article_md.strip()) > 50:
+    if article_md and len(article_md.strip()) > 50 and not has_block_marker:
         pdf_md = f"""---
 title: "{doc_title}"
 author: "{doc_author}"
@@ -1303,12 +1410,20 @@ mainfont: "DejaVu Serif"
                 "-o", str(target_pdf),
                 "--pdf-engine=xelatex"
             ], capture_output=True, text=True, timeout=35)
-            if res.returncode == 0 and target_pdf.is_file() and target_pdf.stat().st_size > 500:
-                pdf_saved = True
+            if res.returncode == 0 and target_pdf.is_file() and target_pdf.stat().st_size > 1000:
+                is_val, reason = is_valid_pdf_content(target_pdf, title=title)
+                if is_val:
+                    pdf_saved = True
+                else:
+                    print(f"⚠️ El PDF web generat no és vàlid: {reason}", file=sys.stderr)
+                    target_pdf.unlink(missing_ok=True)
         except Exception as e:
             print(f"Error compilant PDF amb XeLaTeX: {e}", file=sys.stderr)
+            target_pdf.unlink(missing_ok=True)
         finally:
             tmp_md.unlink(missing_ok=True)
+    elif has_block_marker:
+        print("⚠️ El contingut web extret conté avisos antibot o bloqueig. S'omet la generació del PDF.", file=sys.stderr)
 
     fields = {
         "title": title,
@@ -1329,7 +1444,7 @@ mainfont: "DejaVu Serif"
 
     NOTES_DIR.mkdir(parents=True, exist_ok=True)
     if not note_path.is_file():
-        extra_article = f"\n# Contingut de l'article\n\n{article_md.strip()}\n" if article_md else ""
+        extra_article = f"\n# Contingut de l'article\n\n{article_md.strip()}\n" if (article_md and not has_block_marker) else ""
         note_content = f"""---
 title: "{clean_latex(title)}"
 author: "{clean_latex(author_str)}"
@@ -1412,7 +1527,7 @@ def process_paper_input(raw_input, direct_pdf=None):
         if target_pdf.is_file():
             pdf_saved = True
         elif pdf_url:
-            pdf_saved = download_pdf(pdf_url, target_pdf)
+            pdf_saved = download_pdf(pdf_url, target_pdf, title=title, abstract=meta.get("abstract", ""), doi=doi or "")
             
         if not already_in_bib:
             if raw_bib:
@@ -1445,7 +1560,7 @@ def process_paper_input(raw_input, direct_pdf=None):
             if target_pdf.is_file():
                 pdf_saved = True
             elif final_direct_pdf:
-                pdf_saved = download_pdf(final_direct_pdf, target_pdf)
+                pdf_saved = download_pdf(final_direct_pdf, target_pdf, title=meta.get("title", ""), abstract=meta.get("abstract", ""), doi="")
             bib_entry = build_bibtex_from_dict(citekey, meta, target_pdf)
             with open(BIB_FILE, "a", encoding="utf-8") as f:
                 f.write(f"\n{bib_entry}\n")
@@ -1515,22 +1630,22 @@ def process_paper_input(raw_input, direct_pdf=None):
             if target_pdf.is_file():
                 pdf_saved = True
             elif final_pdf_url:
-                pdf_saved = download_pdf(final_pdf_url, target_pdf)
+                pdf_saved = download_pdf(final_pdf_url, target_pdf, title=paper.title, abstract=paper.abstract or "", doi=paper.doi or "")
 
             if not pdf_saved and paper.doi:
                 doi_url = f"https://doi.org/{paper.doi}"
-                pdf_saved = download_pdf(doi_url, target_pdf)
+                pdf_saved = download_pdf(doi_url, target_pdf, title=paper.title, abstract=paper.abstract or "", doi=paper.doi or "")
                 if not pdf_saved:
                     clean_doi = paper.doi.replace("https://doi.org/", "").strip()
                     for unpaywall_url in find_pdf_urls(clean_doi):
-                        if download_pdf(unpaywall_url, target_pdf):
+                        if download_pdf(unpaywall_url, target_pdf, title=paper.title, abstract=paper.abstract or "", doi=paper.doi or ""):
                             pdf_saved = True
                             break
 
             # Fallback intel·ligent: comprovar a ~/Downloads
             if not pdf_saved:
                 pmid_val = paper.extra.get("pmid") if (paper.extra and isinstance(paper.extra, dict)) else None
-                pdf_saved = check_and_import_from_downloads(target_pdf, title=paper.title, doi=paper.doi, pmid=pmid_val)
+                pdf_saved = check_and_import_from_downloads(target_pdf, title=paper.title, abstract=paper.abstract or "", doi=paper.doi or "", pmid=pmid_val)
 
             if not already_in_bib:
                 bib_entry = paper_to_bibtex(paper, citekey=citekey, target_pdf_path=str(target_pdf) if pdf_saved else None)

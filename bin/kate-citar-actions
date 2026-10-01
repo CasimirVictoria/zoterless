@@ -1,92 +1,79 @@
 #!/usr/bin/env python3
 """
-kate-citar-actions: Menú d'accions sobre la citació sota el cursor a Kate
-Obre el PDF associat a ~/Documents/Biblioteca/pdfs/ (o camp file) a Okular
-i la nota bibliogràfica associada (@citekey.md) de ~/Documents/notes/ a Kate.
+kate-citar-actions: Integració de citacions i notes Faristol per a Kate a KDE Plasma.
+Detecta la citació [@citekey, p. X] o cita sota el cursor i obre instantàniament
+el PDF a Okular a la pàgina exacta i ressalta el fragment (Opció A - Salt Directe).
 """
 
+import os
 import re
 import sys
 import subprocess
 from pathlib import Path
-from PyQt5.QtWidgets import (
-    QApplication, QDialog, QVBoxLayout, QLabel, QPushButton, QLineEdit, QListWidget
-)
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
 
-BIB_FILE = Path.home() / "Documents/Biblioteca/biblioteca.bib"
-PDF_DIR = Path.home() / "Documents/Biblioteca/pdfs"
-NOTES_DIR = Path.home() / "Documents/notes"
+# Rutes canòniques del sistema Faristol / zoterless
+USER_HOME = Path.home()
+DOCS_DIR = USER_HOME / "Documents"
+BIB_FILE = DOCS_DIR / "Biblioteca/biblioteca.bib"
+PDF_DIR = DOCS_DIR / "Biblioteca/pdfs"
+NOTES_DIR = DOCS_DIR / "notes"
 
-def extract_citekey_from_args():
-    """Extreu la clau de citació del text passat per arguments o selecció."""
-    text = " ".join(sys.argv[1:]).strip()
-    if not text:
-        return None
-        
-    matches = re.findall(r'@([a-zA-Z0-9_\-]+)', text)
-    if matches:
-        return matches[-1]
-        
-    for w in text.split():
-        w_clean = re.sub(r'[^a-zA-Z0-9_\-]', '', w)
-        if w_clean:
-            return w_clean
-            
-    return None
 
-def clean_pdf_path(raw_field):
-    """
-    Extreu una ruta vàlida de fitxer PDF del camp file de BibTeX.
-    Maneja formats tipus:
-    - /ruta/fitxer.pdf
-    - /ruta/fitxer.pdf:application/pdf
-    - Títol:/ruta/fitxer.pdf:application/pdf
-    - Rutes múltiples separades per ';'
-    """
+def notify(title: str, message: str, icon: str = "application-pdf", urgency: str = "normal"):
+    """Envia una notificació d'escriptori ràpida a KDE Plasma."""
+    try:
+        subprocess.Popen(
+            ["notify-send", "-a", "Faristol Kate", "-i", icon, "-u", urgency, title, message],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        pass
+
+
+def clean_pdf_path(raw_field: str):
+    """Extreu una ruta vàlida de fitxer PDF del camp file de BibTeX."""
     if not raw_field:
         return None
 
-    # Zotero separa múltiples fitxers amb punt i coma
-    entries = raw_field.split(';')
+    entries = raw_field.split(";")
     for entry in entries:
-        parts = entry.split(':')
+        parts = entry.split(":")
         for part in parts:
             part = part.strip()
-            if part.lower().endswith('.pdf'):
+            if part.lower().endswith(".pdf"):
                 candidate = Path(part)
                 if candidate.is_file():
                     return candidate
                 if (PDF_DIR / candidate.name).is_file():
                     return PDF_DIR / candidate.name
-                    
-    # Si és una ruta directa sense ':'
+
     candidate = Path(raw_field.strip())
-    if candidate.is_file() and candidate.suffix.lower() == '.pdf':
+    if candidate.is_file() and candidate.suffix.lower() == ".pdf":
         return candidate
-    if (PDF_DIR / candidate.name).is_file() and candidate.suffix.lower() == '.pdf':
+    if (PDF_DIR / candidate.name).is_file() and candidate.suffix.lower() == ".pdf":
         return PDF_DIR / candidate.name
 
     return None
 
-def extract_field(name, text):
+
+def extract_field(name: str, text: str) -> str:
     """Extreu el valor d'un camp BibTeX tenint en compte claus niades o cometes."""
-    m = re.search(rf'\b{name}\s*=\s*', text, re.IGNORECASE)
+    m = re.search(rf"\b{name}\s*=\s*", text, re.IGNORECASE)
     if not m:
         return ""
     start = m.end()
     if start >= len(text):
         return ""
-    if text[start] == '{':
+    if text[start] == "{":
         depth = 0
         val = []
         for ch in text[start:]:
-            if ch == '{':
+            if ch == "{":
                 depth += 1
                 if depth > 1:
                     val.append(ch)
-            elif ch == '}':
+            elif ch == "}":
                 depth -= 1
                 if depth == 0:
                     break
@@ -98,58 +85,66 @@ def extract_field(name, text):
         m_quote = re.search(r'^"([^"]*)"', text[start:])
         return m_quote.group(1) if m_quote else ""
     else:
-        m_bare = re.match(r'^([^,\n]+)', text[start:])
+        m_bare = re.match(r"^([^,\n]+)", text[start:])
         return m_bare.group(1).strip() if m_bare else ""
 
-def get_bib_dict():
-    """Llegeix biblioteca.bib i crea un diccionari clau -> {pdf, raw}."""
+
+def get_bib_dict() -> dict:
+    """Llegeix biblioteca.bib i indexa clau -> {pdf, title, author, year, raw}."""
     if not BIB_FILE.is_file():
         return {}
 
     content = BIB_FILE.read_text(encoding="utf-8", errors="ignore")
-    raw_entries = re.split(r'(?:\r?\n|^)@', content)
+    raw_entries = re.split(r"(?:\r?\n|^)@", content)
     bib_dict = {}
     for raw in raw_entries:
         if not raw.strip():
             continue
-        m = re.match(r'^([a-zA-Z]+)\s*\{\s*([^,]+),', raw.strip())
+        m = re.match(r"^([a-zA-Z]+)\s*\{\s*([^,]+),", raw.strip())
         if not m:
             continue
         key = m.group(2).strip()
-        
         file_val = extract_field("file", raw)
         pdf_path = clean_pdf_path(file_val) if file_val else None
-                
+
         bib_dict[key] = {
             "pdf": pdf_path,
-            "raw": raw
+            "title": extract_field("title", raw),
+            "author": extract_field("author", raw),
+            "year": extract_field("year", raw),
+            "raw": raw,
         }
     return bib_dict
 
-def find_pdf_for_key(key, bib_dict):
-    """Retorna el PDF associat al camp file del .bib o cerca per nom a PDF_DIR."""
-    if key in bib_dict and bib_dict[key]["pdf"]:
+
+def find_pdf_for_key(key: str, bib_dict: dict):
+    """Localitza el fitxer PDF associat a la clau de citació."""
+    if key in bib_dict and bib_dict[key]["pdf"] and bib_dict[key]["pdf"].is_file():
         return bib_dict[key]["pdf"]
-        
+
     if not PDF_DIR.is_dir():
         return None
-        
+
+    # 1. Coincidència directa clau.pdf
     direct = PDF_DIR / f"{key}.pdf"
     if direct.is_file():
         return direct
-        
-    key_clean = key.lower().replace('_', '').replace('-', '')
+
+    # 2. Cerca insensible a majúscules/minúscules i caràcters especials
+    key_clean = re.sub(r"[^a-zA-Z0-9]", "", key).lower()
     for f in PDF_DIR.glob("*.pdf"):
-        fname_clean = f.name.lower().replace('_', '').replace('-', '')
-        if key_clean in fname_clean or key.lower() in f.name.lower():
+        fname_clean = re.sub(r"[^a-zA-Z0-9]", "", f.stem).lower()
+        if key_clean == fname_clean or key_clean in fname_clean:
             return f
+
     return None
 
-def find_note_for_key(key):
-    """Cerca la nota bibliogràfica associada a la clau a ~/Documents/notes/."""
+
+def find_note_for_key(key: str):
+    """Localitza la nota bibliogràfica associada a la clau."""
     if not NOTES_DIR.is_dir():
         return None
-        
+
     candidates = [
         NOTES_DIR / f"@{key}.md",
         NOTES_DIR / f"{key}.md",
@@ -157,174 +152,327 @@ def find_note_for_key(key):
     for c in candidates:
         if c.is_file():
             return c
-            
+
     key_clean = key.lower()
     for f in NOTES_DIR.glob("*.md"):
         if f.stem.lower() in [f"@{key_clean}", key_clean]:
             return f
-            
+
     return None
 
-def launch_file(filepath):
-    """Obre un fitxer de manera desacoblada del procés pare."""
-    path_str = str(filepath.resolve())
-    if filepath.suffix.lower() == '.pdf':
-        cmd = ["okular", path_str]
-    elif filepath.suffix.lower() in ['.org', '.md', '.qmd', '.txt']:
-        cmd = ["kate", path_str]
-    else:
-        cmd = ["xdg-open", path_str]
-        
+
+def find_best_okular_search(pdf_path: Path, page: int, raw_quote: str) -> str:
+    """
+    Troba el millor fragment de cerca continu (3-4 paraules netes) per a Okular (--find).
+    Comprova el text real de la pàgina del PDF per evitar cadenes trencades
+    per un salt de línia al document PDF original.
+    """
+    if not raw_quote or not pdf_path or not pdf_path.is_file():
+        return ""
+
+    page_text = ""
+    try:
+        res = subprocess.run(
+            ["pdftotext", "-f", str(page), "-l", str(page), str(pdf_path), "-"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        page_text = res.stdout or ""
+    except Exception:
+        page_text = ""
+
+    # Netejar la cita: treure referències interiors tipus (Anderson et al., 2014)
+    clean_quote = re.sub(r"\([^\)]*\)", "", raw_quote)
+    # Extreure paraules alfanumèriques netes
+    words = re.findall(r"[\w\-]+", clean_quote)
+    if not words:
+        return ""
+
+    if not page_text:
+        return " ".join(words[:4])
+
+    page_lines = [l.strip() for l in page_text.splitlines() if l.strip()]
+
+    def is_good_candidate(cand: str) -> bool:
+        c_words = cand.split()
+        sig = sum(1 for w in c_words if len(w) > 3)
+        return sig >= 2 or len(cand) >= 14
+
+    # Prioritat 1: Inici de la cita (primers 4 mots, després primers 3 mots)
+    for n in [4, 3]:
+        if len(words) >= n:
+            cand = " ".join(words[:n])
+            if is_good_candidate(cand):
+                for pl in page_lines:
+                    if re.search(r"\b" + re.escape(cand) + r"\b", pl, re.IGNORECASE):
+                        return cand
+
+    # Prioritat 2: Si l'inici estava partit per un salt de línia al PDF,
+    # avançar mot a mot per trobar les primeres 3-4 paraules que sí estan senceres a una sola línia
+    for i in range(1, min(len(words), 20)):
+        for n in [4, 3]:
+            if i + n <= len(words):
+                cand = " ".join(words[i:i + n])
+                if is_good_candidate(cand):
+                    for pl in page_lines:
+                        if re.search(r"\b" + re.escape(cand) + r"\b", pl, re.IGNORECASE):
+                            return cand
+
+    return " ".join(words[:4])
+
+
+def extract_context_from_kate(file_path_str: str, cursor_line_str: str, cursor_col_str: str, selection_text: str):
+    """
+    Extreu la clau de citació (@citekey), la pàgina i el text de la cita
+    a partir del fitxer i la posició del cursor a Kate (expandint el bloc de paràgraf).
+    """
+    citekey = None
+    page = 1
+    raw_quote = ""
+
+    lines = []
+    line_idx = -1
+    col_idx = 0
+    file_path = None
+
+    if file_path_str:
+        p = Path(file_path_str)
+        if p.is_file():
+            file_path = p
+            try:
+                lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except Exception:
+                pass
+
+    if cursor_line_str and cursor_line_str.isdigit():
+        line_idx = int(cursor_line_str)
+    if cursor_col_str and cursor_col_str.isdigit():
+        col_idx = int(cursor_col_str)
+
+    # 1. Text d'anàlisi: si hi ha selecció manual usem la selecció;
+    # si no, expandim el bloc de paràgraf amunt i avall per capturar cites multilínia
+    target_text = ""
+    if selection_text and selection_text.strip():
+        target_text = selection_text.strip()
+    elif lines and 0 <= line_idx < len(lines):
+        start_idx = line_idx
+        # Expandir cap amunt mentre no siga línia buida (màx 8 línies)
+        while start_idx > 0 and lines[start_idx - 1].strip() and (line_idx - start_idx) < 8:
+            start_idx -= 1
+
+        end_idx = line_idx
+        # Expandir cap avall mentre no siga línia buida (màx 8 línies)
+        while end_idx < len(lines) - 1 and lines[end_idx + 1].strip() and (end_idx - line_idx) < 8:
+            end_idx += 1
+
+        target_text = "\n".join(lines[start_idx:end_idx + 1])
+    elif selection_text:
+        target_text = selection_text
+
+    # 2. Resolució de la clau (@citekey)
+    if target_text:
+        # Si tenim la línia actual i múltiples claus, agafem la més propera a la columna del cursor
+        if lines and 0 <= line_idx < len(lines):
+            curr_l = lines[line_idx]
+            matches_curr = list(re.finditer(r"@([a-zA-Z0-9_\-]+)", curr_l))
+            if matches_curr:
+                matches_curr.sort(key=lambda m: abs(m.start() - col_idx))
+                citekey = matches_curr[0].group(1)
+
+        # Si no estava a la línia actual, cerca global al bloc de paràgraf
+        if not citekey:
+            all_keys = re.findall(r"@([a-zA-Z0-9_\-]+)", target_text)
+            if all_keys:
+                citekey = all_keys[0]
+
+    # Si encara no hem trobat clau, mirar el fitxer mateix (si és una nota d'article tipus @autor2024.md)
+    if not citekey and file_path:
+        m_fn = re.search(r"@([a-zA-Z0-9_\-]+)", file_path.name)
+        if m_fn:
+            citekey = m_fn.group(1)
+        else:
+            # Comprovar YAML frontmatter de la nota
+            for l in lines[:25]:
+                m_yaml = re.search(r'citekey\s*:\s*["\']?@?([a-zA-Z0-9_\-]+)["\']?', l, re.IGNORECASE)
+                if m_yaml:
+                    citekey = m_yaml.group(1)
+                    break
+
+    # 3. Resolució del número de pàgina (p. X, pp. X, Y, o (p. X))
+    if target_text:
+        m_p = re.search(r"(?:pp?\.?|pàgs?\.?|pags?\.?|pages?)\s*([0-9]+)", target_text, re.IGNORECASE)
+        if not m_p:
+            m_p = re.search(r"\(\s*(?:pp?\.?|pàgs?\.?|pags?\.?)?\s*([0-9]+)\s*\)", target_text)
+        if m_p:
+            try:
+                page = int(m_p.group(1))
+            except ValueError:
+                page = 1
+
+    # 4. Extreure la cita textual (raw_quote) del bloc
+    if target_text:
+        m_q = re.search(r'["«“](.+?)["»”]', target_text, re.DOTALL)
+        if m_q:
+            raw_quote = m_q.group(1).strip()
+
+    return citekey, page, raw_quote
+
+
+def launch_okular(pdf_path: Path, page: int = 1, search_text: str = ""):
+    """
+    Obre el PDF a Okular mitjançant opcions avançades:
+    --unique: reutilitza la finestra d'Okular ja oberta
+    -p: salta a la pàgina exacta
+    --find: cerca i ressalta el fragment
+    """
+    cmd = ["okular", "--unique"]
+    if page and page > 1:
+        cmd.extend(["-p", str(page)])
+    if search_text:
+        cmd.extend(["--find", search_text])
+    cmd.append(str(pdf_path.resolve()))
+
     subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
-        start_new_session=True
+        start_new_session=True,
     )
 
-class ActionDialog(QDialog):
-    def __init__(self, key, pdf_path, note_path):
-        super().__init__()
-        self.key = key
-        self.pdf_path = pdf_path
-        self.note_path = note_path
-        self.init_ui()
-        
-    def init_ui(self):
-        self.setWindowTitle(f"📑 Accions sobre: @{self.key}")
-        self.resize(580, 240)
-        self.setAttribute(Qt.WA_DeleteOnClose)
-        
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(15, 15, 15, 15)
-        layout.setSpacing(10)
-        
-        font = QFont()
-        font.setPointSize(10)
-        self.setFont(font)
-        
-        title_label = QLabel(f"<b>Referència:</b> <code style='color:#1a73e8; font-size:12pt;'>@{self.key}</code>", self)
-        layout.addWidget(title_label)
-        
-        # Botó 1: Obrir PDF
-        if self.pdf_path:
-            pdf_text = f"📄 Obrir PDF ({self.pdf_path.name})"
-        else:
-            pdf_text = "📄 PDF: No trobat"
-        self.btn_pdf = QPushButton(pdf_text, self)
-        self.btn_pdf.setEnabled(self.pdf_path is not None)
-        self.btn_pdf.clicked.connect(self.open_pdf)
-        layout.addWidget(self.btn_pdf)
-        
-        # Botó 2: Obrir Nota bibliogràfica
-        if self.note_path:
-            note_text = f"📝 Obrir Nota ({self.note_path.name})"
-        else:
-            note_text = f"📝 Nota: No trobada (@{self.key}.md a notes/)"
-        self.btn_note = QPushButton(note_text, self)
-        self.btn_note.setEnabled(self.note_path is not None)
-        self.btn_note.clicked.connect(self.open_note)
-        layout.addWidget(self.btn_note)
-        
-        # Botó Tancar
-        btn_cancel = QPushButton("Tancar (Esc)", self)
-        btn_cancel.clicked.connect(self.reject)
-        layout.addWidget(btn_cancel)
-        
-        if self.pdf_path:
-            self.btn_pdf.setFocus()
-        elif self.note_path:
-            self.btn_note.setFocus()
-            
-    def open_pdf(self):
-        if self.pdf_path:
-            launch_file(self.pdf_path)
-            self.accept()
-            
-    def open_note(self):
-        if self.note_path:
-            launch_file(self.note_path)
-            self.accept()
 
-class KeySelectDialog(QDialog):
-    def __init__(self, all_keys):
-        super().__init__()
-        self.all_keys = all_keys
-        self.selected_key = None
-        self.init_ui()
-        
-    def init_ui(self):
-        self.setWindowTitle("🔍 Tria una referència per obrir PDF o Nota")
-        self.resize(650, 420)
-        self.setAttribute(Qt.WA_DeleteOnClose)
-        
-        layout = QVBoxLayout(self)
-        self.search_input = QLineEdit(self)
-        self.search_input.setPlaceholderText("🔍 Cerca clau de citació...")
-        self.search_input.textChanged.connect(self.filter_keys)
-        layout.addWidget(self.search_input)
-        
-        self.list_widget = QListWidget(self)
-        self.list_widget.itemDoubleClicked.connect(self.accept_selection)
-        layout.addWidget(self.list_widget)
-        
-        self.populate(self.all_keys)
-        self.search_input.setFocus()
-        
-    def populate(self, keys):
-        self.list_widget.clear()
-        for k in keys:
-            self.list_widget.addItem(k)
-        if self.list_widget.count() > 0:
-            self.list_widget.setCurrentRow(0)
-            
-    def filter_keys(self, text):
-        q = text.strip().lower()
-        filtered = [k for k in self.all_keys if q in k.lower()]
-        self.populate(filtered)
-        
-    def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            self.accept_selection()
-        elif event.key() == Qt.Key_Escape:
-            self.reject()
-        else:
-            super().keyPressEvent(event)
-            
-    def accept_selection(self):
-        item = self.list_widget.currentItem()
-        if item:
-            self.selected_key = item.text()
-            self.accept()
-        else:
-            self.reject()
+def show_selection_dialog(bib_dict: dict):
+    """Diàleg PyQt5 de fallback si no s'ha pogut inferir cap clau automàticament."""
+    from PyQt5.QtWidgets import (
+        QApplication, QDialog, QVBoxLayout, QLineEdit, QListWidget
+    )
+    from PyQt5.QtCore import Qt
+
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    class KeyDialog(QDialog):
+        def __init__(self, keys):
+            super().__init__()
+            self.keys = keys
+            self.selected_key = None
+            self.setWindowTitle("🔍 Tria una referència per obrir a Okular")
+            self.resize(650, 420)
+            self.setAttribute(Qt.WA_DeleteOnClose)
+
+            layout = QVBoxLayout(self)
+            self.search_input = QLineEdit(self)
+            self.search_input.setPlaceholderText("🔍 Escriu autor, títol o clau...")
+            self.search_input.textChanged.connect(self.filter_keys)
+            layout.addWidget(self.search_input)
+
+            self.list_widget = QListWidget(self)
+            self.list_widget.itemDoubleClicked.connect(self.accept_selection)
+            layout.addWidget(self.list_widget)
+
+            self.populate(self.keys)
+            self.search_input.setFocus()
+
+        def populate(self, k_list):
+            self.list_widget.clear()
+            for k in k_list:
+                info = bib_dict.get(k, {})
+                t = info.get("title", "")
+                a = info.get("author", "")
+                y = info.get("year", "")
+                label = f"@{k}"
+                if a or y:
+                    label += f" — {a} ({y})"
+                if t:
+                    label += f"\n   ↳ {t[:90]}"
+                self.list_widget.addItem(label)
+            if self.list_widget.count() > 0:
+                self.list_widget.setCurrentRow(0)
+
+        def filter_keys(self, q):
+            q = q.lower().strip()
+            filtered = []
+            for k in self.keys:
+                info = bib_dict.get(k, {})
+                haystack = f"{k} {info.get('title','')} {info.get('author','')} {info.get('year','')}".lower()
+                if q in haystack:
+                    filtered.append(k)
+            self.populate(filtered)
+
+        def accept_selection(self):
+            row = self.list_widget.currentRow()
+            item = self.list_widget.currentItem()
+            if item:
+                # Extreure la clau pura abans del primer espai o guió
+                txt = item.text().splitlines()[0]
+                k = txt.split("—")[0].replace("@", "").strip()
+                self.selected_key = k
+                self.accept()
+            else:
+                self.reject()
+
+        def keyPressEvent(self, event):
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self.accept_selection()
+            elif event.key() == Qt.Key_Escape:
+                self.reject()
+            else:
+                super().keyPressEvent(event)
+
+    dlg = KeyDialog(sorted(list(bib_dict.keys())))
+    if dlg.exec_() == QDialog.Accepted and dlg.selected_key:
+        return dlg.selected_key
+    return None
+
 
 def main():
-    if not BIB_FILE.is_file():
-        sys.stderr.write(f"No s'ha trobat el fitxer {BIB_FILE}\n")
-        sys.exit(1)
+    # Arguments que envia Kate:
+    # 1: %{Document:FilePath}
+    # 2: %{Document:Cursor:Line}
+    # 3: %{Document:Cursor:Column}
+    # 4: %{Document:Selection:Text}
+    file_path_str = sys.argv[1] if len(sys.argv) > 1 else ""
+    cursor_line_str = sys.argv[2] if len(sys.argv) > 2 else ""
+    cursor_col_str = sys.argv[3] if len(sys.argv) > 3 else ""
+    selection_text = " ".join(sys.argv[4:]) if len(sys.argv) > 4 else ""
 
-    key = extract_citekey_from_args()
+    # 1. Carregar índex BibTeX
     bib_dict = get_bib_dict()
-    if not bib_dict:
-        sys.stderr.write("No s'han trobat entrades al fitxer BibTeX\n")
+
+    # 2. Extreure context (clau, pàgina i text citat brut)
+    citekey, page, raw_quote = extract_context_from_kate(
+        file_path_str, cursor_line_str, cursor_col_str, selection_text
+    )
+
+    # 3. Fallback a diàleg ràpid si no s'ha pogut deduir cap clau
+    if not citekey:
+        citekey = show_selection_dialog(bib_dict)
+        if not citekey:
+            sys.exit(0)
+
+    # 4. Localitzar el PDF
+    pdf_path = find_pdf_for_key(citekey, bib_dict)
+
+    if not pdf_path or not pdf_path.is_file():
+        notify(
+            "PDF no trobat",
+            f"No s'ha trobat el PDF per a @{citekey} a {PDF_DIR.name}/",
+            icon="dialog-warning",
+            urgency="critical",
+        )
         sys.exit(1)
 
-    app = QApplication(sys.argv)
-    
-    if not key:
-        sel_dialog = KeySelectDialog(sorted(list(bib_dict.keys())))
-        if sel_dialog.exec_() == QDialog.Accepted and sel_dialog.selected_key:
-            key = sel_dialog.selected_key
-        else:
-            sys.exit(0)
-            
-    pdf_path = find_pdf_for_key(key, bib_dict)
-    note_path = find_note_for_key(key)
-    
-    dialog = ActionDialog(key, pdf_path, note_path)
-    dialog.exec_()
+    # 5. Cercar el millor fragment continu que no estiga tallat per un salt de línia al PDF
+    search_text = find_best_okular_search(pdf_path, page, raw_quote)
+
+    # 6. Opció A: Salt Directe Instantani a Okular
+    detail_msg = f"@{citekey} · Pàgina {page}"
+    if search_text:
+        detail_msg += f'\nCercant: "{search_text}"'
+
+    notify("Obrint citació a Okular", detail_msg, icon="application-pdf")
+    launch_okular(pdf_path, page, search_text)
+
 
 if __name__ == "__main__":
     main()
