@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""
+zoterless-capture-web: Captura automàticament la pàgina web activa com a article PDF maquetat a la biblioteca.
+Optimitzat per a Falkon, Firefox i altres navegadors a KDE Plasma 6.
+"""
+
+import os
+import re
+import subprocess
+import sys
+import time
+
+def notify(title, message, urgency="normal"):
+    try:
+        subprocess.run(
+            ["notify-send", "-a", "Zoterless", "-u", urgency, "-i", "internet-web-browser", title, message],
+            check=False
+        )
+    except Exception:
+        pass
+
+def get_target_url():
+    # 1. Comprovar si hi ha URL seleccionada amb el ratolí (Wayland primary selection)
+    try:
+        res = subprocess.run(["wl-paste", "--primary", "--no-newline"], capture_output=True, text=True, timeout=1)
+        sel = res.stdout.strip()
+        if sel.startswith("http://") or sel.startswith("https://"):
+            return sel
+    except Exception:
+        pass
+
+    # 2. Demanar URL al navegador actiu amb ydotool (Ctrl+L -> Ctrl+C -> Esc)
+    try:
+        subprocess.run(["ydotool", "key", "29:1", "38:1", "38:0", "29:0"], timeout=1)
+        time.sleep(0.08)
+        subprocess.run(["ydotool", "key", "29:1", "46:1", "46:0", "29:0"], timeout=1)
+        time.sleep(0.08)
+        subprocess.run(["ydotool", "key", "1:1", "1:0"], timeout=1)
+        time.sleep(0.05)
+
+        new_clip = subprocess.run(["wl-paste", "--no-newline"], capture_output=True, text=True, timeout=1).stdout.strip()
+        if new_clip and (new_clip.startswith("http://") or new_clip.startswith("https://")):
+            return new_clip
+    except Exception:
+        pass
+
+    # 3. Fallback al portapapers general
+    try:
+        clip = subprocess.run(["wl-paste", "--no-newline"], capture_output=True, text=True, timeout=1).stdout.strip()
+        if clip.startswith("http://") or clip.startswith("https://"):
+            return clip
+    except Exception:
+        pass
+
+    return None
+
+def main():
+    url = get_target_url()
+    if not url:
+        notify("Zoterless: Capturar Web", "⚠️ No s'ha trobat cap URL web a la finestra activa ni al portapapers.", "critical")
+        sys.exit(1)
+
+    notify("Zoterless: Capturar Web", f"🌐 Capturant article web...\n{url[:60]}")
+    cmd = ["add-paper", "--web", url]
+    subprocess.run(cmd)
+
+if __name__ == "__main__":
+    main()

@@ -21,7 +21,7 @@ done
 
 # 2. Instal·lar binaris (symlinks per desenvolupament o còpies)
 mkdir -p "$BIN_DEST"
-for script in zotero-receiver kate-citar kate-citar-actions add-paper kate-sync-project; do
+for script in zotero-receiver kate-citar kate-citar-actions add-paper kate-sync-project zoterless-capture-paper zoterless-capture-web; do
     if [ -f "$DIR/bin/$script" ]; then
         ln -sf "$DIR/bin/$script" "$BIN_DEST/$script"
         chmod +x "$DIR/bin/$script"

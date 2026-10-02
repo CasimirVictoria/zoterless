@@ -480,6 +480,50 @@ def extract_doi_from_html(url):
         print(f"Error explorant la pàgina web: {e}", file=sys.stderr)
     return None
 
+def extract_doi_from_pdf_file(pdf_path):
+    """Extreu el DOI d'un fitxer PDF local mitjançant pdftotext o cerca del títol a OpenAlex."""
+    if not Path(pdf_path).is_file():
+        return None
+    try:
+        res = subprocess.run(["pdftotext", "-l", "3", str(pdf_path), "-"], capture_output=True, text=True, timeout=5)
+        if res.returncode == 0 and res.stdout:
+            m = re.search(r'\b(10\.\d{4,9}/[^\s"<>#]+)', res.stdout)
+            if m:
+                return m.group(1).rstrip(".,;)>]")
+            lines = [l.strip() for l in res.stdout.splitlines() if len(l.strip()) > 15 and not l.strip().startswith("%")]
+            for cand in lines[:4]:
+                oa = search_openalex(cand)
+                if oa and oa.get("doi"):
+                    return oa["doi"].replace("https://doi.org/", "").strip()
+    except Exception:
+        pass
+    return None
+
+def extract_doi_from_pdf_path_or_url(target):
+    """Si target és un PDF local o remot, en descarrega la capçalera i extreu el DOI."""
+    target_clean = unquote(target).strip()
+    if target_clean.startswith("file://"):
+        return extract_doi_from_pdf_file(target_clean[7:])
+    if Path(target_clean).is_file():
+        return extract_doi_from_pdf_file(target_clean)
+    if target_clean.startswith("http://") or target_clean.startswith("https://"):
+        temp_pdf = Path(f"/tmp/zoterless_detect_{int(time.time()*1000)}.pdf")
+        try:
+            cmd = ["curl", "-sL", "-r", "0-2097151", "-A", HEADERS["User-Agent"], "-o", str(temp_pdf), target_clean]
+            subprocess.run(cmd, timeout=10)
+            if temp_pdf.is_file() and temp_pdf.stat().st_size > 500:
+                doi = extract_doi_from_pdf_file(temp_pdf)
+                return doi
+        except Exception:
+            pass
+        finally:
+            if temp_pdf.exists():
+                try:
+                    temp_pdf.unlink()
+                except Exception:
+                    pass
+    return None
+
 def resolve_dialnet(text):
     """Detecta URL o identificador de Dialnet i resol DOI canònic i descàrrega directa de PDF."""
     m_dn = re.search(r'(?:dialnet\.unirioja\.es/(?:servlet/articulo\?codigo=|descarga/articulo/)|dialnet:)(\d+)', text, re.I)
@@ -624,7 +668,13 @@ def resolve_doi_or_arxiv(text):
         arxiv_id = m_arxiv.group(1)
         return f"10.48550/arXiv.{arxiv_id}", f"https://arxiv.org/pdf/{arxiv_id}.pdf"
         
-    # Si és una URL general, intentar extreure'n el DOI explorant el codi font
+    # 3. Comprovació de PDF directe en línia o fitxer local
+    if text.startswith("file://") or text.lower().endswith(".pdf") or "/pdf/" in text.lower():
+        doi_from_pdf = extract_doi_from_pdf_path_or_url(text)
+        if doi_from_pdf:
+            return doi_from_pdf, text
+
+    # 4. Si és una URL general, intentar extreure'n el DOI explorant el codi font
     if text.startswith("http://") or text.startswith("https://"):
         doi = extract_doi_from_html(text)
         if doi:
@@ -1472,10 +1522,15 @@ tags: []
     print(f"   Nota: {note_path}")
     return True
 
-def process_paper_input(raw_input, direct_pdf=None):
+def process_paper_input(raw_input, direct_pdf=None, force_web=False):
     """Processa qualsevol entrada: URL, DOI, Dialnet, cerca de text o dades estructurades."""
     raw_input = unquote(raw_input).strip()
     raw_input = re.sub(r'^(?:bibtex|bib):\/?\/?', '', raw_input, flags=re.IGNORECASE).strip()
+    
+    # Si s'indica captura web forçada o prefix web:
+    if force_web or raw_input.startswith("web:"):
+        clean_url = re.sub(r'^web:', '', raw_input).strip()
+        return process_web_article(clean_url)
     
     # Dades estructurades directes del navegador (marcador o extensió)
     if raw_input.startswith("data:"):
@@ -1829,6 +1884,7 @@ descarrega el PDF automàticament a pdfs/ i en crea la nota Markdown a notes/@ci
 
 Opcions:
   -s, --search [TERMES]   Cerca interactiva federada (OpenAlex, ERIC, Crossref, Dialnet)
+  -w, --web               Força la captura com a pàgina web maquetada a PDF (XeLaTeX)
   --vpn                   Connecta automàticament a EduVPN UV abans de la descàrrega
   -h, --help              Mostra aquesta ajuda
 
@@ -1862,6 +1918,14 @@ def main():
             args.pop(idx + 1)
             args.pop(idx)
 
+    force_web_arg = False
+    if "--web" in args or "-w" in args:
+        force_web_arg = True
+        if "--web" in args:
+            args.remove("--web")
+        if "-w" in args:
+            args.remove("-w")
+
     if args and args[0] in ("-s", "--search"):
         query = " ".join(args[1:]).strip()
         interactive_search(query)
@@ -1879,7 +1943,7 @@ def main():
         print("Executa 'add-paper --help' o 'add-paper -s [termes]' per cercar interactivament.", file=sys.stderr)
         sys.exit(1)
         
-    process_paper_input(raw_input, direct_pdf=direct_pdf_arg)
+    process_paper_input(raw_input, direct_pdf=direct_pdf_arg, force_web=force_web_arg)
 
 if __name__ == "__main__":
     main()
