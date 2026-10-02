@@ -14,7 +14,7 @@ rm -f "$HOME/.config/systemd/user/zotero-receiver.service"
 rm -f "$HOME/.config/systemd/user/zotero-receiver.socket"
 systemctl --user daemon-reload
 
-for script in zotero-receiver kate-citar kate-citar-actions add-paper kate-sync-project; do
+for script in zotero-receiver kate-citar kate-citar-actions add-paper kate-sync-project zoterless-capture-paper zoterless-capture-web; do
     rm -f "$HOME/.local/bin/$script"
 done
 
