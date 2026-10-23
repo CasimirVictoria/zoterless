@@ -160,8 +160,37 @@ chmod +x install.sh
 
 L'instal·lador:
 - Enllaça els binaris a `~/.local/bin/` (`zotero-receiver`, `add-paper`, `kate-citar`, `kate-citar-actions`, `kate-sync-project`, `zoterless-capture-paper`, `zoterless-capture-web`).
-- Configura i activa `zotero-receiver.socket` a `systemd --user`.
-- **En repòs el consum és de 0 MB de RAM.**
+- Copia i activa `zotero-receiver.socket` i `zotero-receiver.service` a `~/.config/systemd/user/`.
+- **En repòs el consum és estrictament de 0 MB de RAM.**
+
+---
+
+## ⚙️ Arquitectura Systemd Socket Activation (0 MB RAM en Repòs)
+
+`zoterless` aprofita la funcionalitat de **Socket Activation de systemd** per eliminar la necessitat de tindre servidors o interfícies pesades obertes permanentment a la memòria:
+
+1. **`zotero-receiver.socket`:** systemd s'encarrega d'escoltar al port `0.0.0.0:23119` (tant en local com per la interfície de **Tailscale** per a Android). Com que és systemd qui manté el socket obert, **el consum de RAM de zoterless és de 0 MB**.
+2. **`zotero-receiver.service`:** Quan fas clic a la icona de Zotero Connector a Firefox, envies un document des d'Android o deses una web amb SingleFile, systemd detecta el trànsit i desperta el servei en mil·lisegons (`python3 ~/.local/bin/zotero-receiver`), que processa la ingesta, actualitza els fitxers i torna a l'estat de repòs.
+
+### Ordres de gestió amb Systemd
+
+```bash
+# 1. Habilitar i arrencar el socket d'escolta permanent
+systemctl --user enable --now zotero-receiver.socket
+
+# 2. Comprovar l'estat del socket d'escolta (sempre actiu)
+systemctl --user status zotero-receiver.socket
+
+# 3. Comprovar l'estat del servei de processament (s'activa a demanda)
+systemctl --user status zotero-receiver.service
+
+# 4. Veure els registres d'ingesta en viu (logs)
+journalctl --user -u zotero-receiver -f
+
+# 5. Reiniciar o aturar si cal aplicar canvis manuals
+systemctl --user restart zotero-receiver.service
+systemctl --user restart zotero-receiver.socket
+```
 
 ---
 
