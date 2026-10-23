@@ -62,8 +62,18 @@ STOPWORDS = {
     "les", "y", "en", "sobre", "un", "una", "los", "las", "del", "dels", "e", "o", "u"
 }
 
+def trigger_faristol_sync():
+    """Avisa Faristol que s'ha afegit un document perquè s'actualitze la interfície a l'instant."""
+    try:
+        req = Request("http://127.0.0.1:8080/api/library/notify-change", data=b"{}", headers={"Content-Type": "application/json"}, method="POST")
+        with urlopen(req, timeout=0.8):
+            pass
+    except Exception:
+        pass
+
 def trigger_kate_sync():
-    """Sincronitza en segon pla el projecte de Kate per reflectir immediatament el nou article."""
+    """Sincronitza en segon pla el projecte de Kate i Faristol per reflectir immediatament el nou article."""
+    trigger_faristol_sync()
     try:
         sync_cmd = shutil.which("kate-sync-project") or str(Path.home() / ".local/bin/kate-sync-project")
         if Path(sync_cmd).is_file():
