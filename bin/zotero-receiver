@@ -26,8 +26,10 @@ import unicodedata
 import glob
 import shutil
 from pathlib import Path
-from urllib.parse import quote, unquote, urljoin
+from urllib.parse import quote, unquote, urljoin, urlparse, parse_qs
 from urllib.request import Request, urlopen
+from email.parser import BytesParser
+from email.policy import default as email_default_policy
 
 BIB_FILE = Path.home() / "Documents/Biblioteca/biblioteca.bib"
 PDF_DIR = Path.home() / "Documents/Biblioteca/pdfs"
@@ -252,9 +254,17 @@ def extract_doi_from_text(text):
     return None
 
 def extract_doi_from_pdf(pdf_path):
-    """Extreu el DOI directament de les primeres pàgines del fitxer PDF emprant pdftotext."""
+    """Extreu el DOI directament de les primeres pàgines o metadades del fitxer PDF."""
     if not Path(pdf_path).is_file():
         return None
+    try:
+        res_info = subprocess.run(["pdfinfo", str(pdf_path)], capture_output=True, text=True, timeout=4)
+        if res_info.returncode == 0 and res_info.stdout:
+            doi = extract_doi_from_text(res_info.stdout)
+            if doi:
+                return doi
+    except Exception:
+        pass
     try:
         res = subprocess.run(
             ["pdftotext", "-l", "3", str(pdf_path), "-"],
@@ -267,6 +277,36 @@ def extract_doi_from_pdf(pdf_path):
     except Exception:
         pass
     return None
+
+def extract_title_guess_from_pdf(pdf_path, fallback_filename=""):
+    """Intenta deduir el títol d'un PDF pujat quan no té DOI explícit."""
+    if Path(pdf_path).is_file():
+        try:
+            res_info = subprocess.run(["pdfinfo", str(pdf_path)], capture_output=True, text=True, timeout=4)
+            if res_info.returncode == 0 and res_info.stdout:
+                m_t = re.search(r'^Title:\s*(.+)$', res_info.stdout, re.M)
+                if m_t:
+                    cand = m_t.group(1).strip()
+                    if len(cand) > 8 and not cand.lower().endswith((".pdf", ".doc", ".docx", "untitled")):
+                        return cand
+        except Exception:
+            pass
+        try:
+            res = subprocess.run(["pdftotext", "-l", "1", str(pdf_path), "-"], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and res.stdout:
+                lines = [ln.strip() for ln in res.stdout.splitlines() if len(ln.strip()) > 12]
+                for ln in lines[:8]:
+                    if not re.search(r'(?:issn|isbn|doi|vol\.|volume|downloaded|copyright|http|www\.|journal|universit)', ln, re.I):
+                        if 15 <= len(ln) <= 180:
+                            return ln
+        except Exception:
+            pass
+    if fallback_filename:
+        clean_fn = re.sub(r'\.pdf$', '', fallback_filename, flags=re.I)
+        clean_fn = re.sub(r'[_+\-]+', ' ', clean_fn).strip()
+        if len(clean_fn) > 4:
+            return clean_fn
+    return "Document PDF"
 
 def search_crossref_by_title(title):
     """Cerca a Crossref per títol per recuperar el DOI oficial."""
@@ -684,7 +724,9 @@ def process_zotero_item(item):
     # 4. Citekey
     citekey = generate_citekey(first_author_lastname, title, year)
     target_pdf = PDF_DIR / f"{citekey}.pdf"
+    target_html = PDF_DIR / f"{citekey}.html"
     pdf_saved = False
+    html_saved = False
 
     # 5. Adquisició del PDF (Estratègia multicanal estil KBibTeX)
     if target_pdf.is_file():
@@ -797,6 +839,16 @@ def process_zotero_item(item):
                     downloaded = res.stdout
 
             if downloaded:
+                # Si ja tenim un snapshot SingleFile o és una pàgina web amb HTML però Trafilatura no trau text llarg, igualment desem el .html!
+                raw_html_snap = item.get("html") or ""
+                if raw_html_snap and ("<html" in raw_html_snap.lower() or "<!doctype" in raw_html_snap.lower() or len(raw_html_snap) > 500):
+                    try:
+                        PDF_DIR.mkdir(parents=True, exist_ok=True)
+                        (PDF_DIR / f"{citekey}.html").write_text(raw_html_snap, encoding="utf-8")
+                        html_saved = True
+                    except Exception:
+                        pass
+
                 meta = trafilatura.extract_metadata(downloaded)
                 article_md = trafilatura.extract(
                     downloaded,
@@ -842,11 +894,39 @@ def process_zotero_item(item):
                         if new_surname != "desconegut":
                             first_author_lastname = new_surname
                     
+                    old_citekey = citekey
                     citekey = generate_citekey(first_author_lastname, title, year)
+                    if old_citekey != citekey and (PDF_DIR / f"{old_citekey}.html").is_file() and not (PDF_DIR / f"{citekey}.html").is_file():
+                        try:
+                            (PDF_DIR / f"{old_citekey}.html").replace(PDF_DIR / f"{citekey}.html")
+                        except Exception:
+                            pass
                     target_pdf = PDF_DIR / f"{citekey}.pdf"
 
                     if not journal and meta and meta.sitename:
                         journal = meta.sitename
+
+                    # 5h-0. Si és una pàgina web o hem rebut un snapshot SingleFile/HTML de Firefox, desar també el fitxer .html íntegre!
+                    target_html = PDF_DIR / f"{citekey}.html"
+                    raw_html_snap = item.get("html") or ""
+                    if raw_html_snap and ("<html" in raw_html_snap.lower() or "<!doctype" in raw_html_snap.lower() or len(raw_html_snap) > 500):
+                        try:
+                            PDF_DIR.mkdir(parents=True, exist_ok=True)
+                            target_html.write_text(raw_html_snap, encoding="utf-8")
+                            html_saved = True
+                        except Exception as e_h:
+                            print(f"Error desant snapshot HTML: {e_h}", file=sys.stderr)
+                    elif is_web and downloaded and ("<html" in downloaded.lower() or "<!doctype" in downloaded.lower()):
+                        try:
+                            PDF_DIR.mkdir(parents=True, exist_ok=True)
+                            # Assegurar base href perquè els recursos relatius carreguen si no era SingleFile pur
+                            html_to_save = downloaded
+                            if item_url.startswith("http") and "<base " not in html_to_save.lower():
+                                html_to_save = re.sub(r'(<head\b[^>]*>)', rf'\1<base href="{item_url}">', html_to_save, count=1, flags=re.I)
+                            target_html.write_text(html_to_save, encoding="utf-8")
+                            html_saved = True
+                        except Exception as e_h2:
+                            print(f"Error desant HTML descarregat: {e_h2}", file=sys.stderr)
 
                     doc_title = clean_latex(title).replace('\n', ' ').strip()
                     doc_author = clean_latex(author_str).replace('\n', ' ').strip()
@@ -910,7 +990,7 @@ mainfont: "DejaVu Serif"
         "pages": pages,
         "doi": doi,
         "url": item_url,
-        "file": str(target_pdf) if pdf_saved else ""
+        "file": str(target_pdf) if pdf_saved else (str(PDF_DIR / f"{citekey}.html") if html_saved else "")
     }
     if abstract_clean:
         fields["abstract"] = abstract_clean
@@ -946,7 +1026,11 @@ tags: []
         note_path.write_text(note_content, encoding="utf-8")
 
     # 8. Notificació d'èxit
-    if pdf_saved:
+    if pdf_saved and html_saved:
+        pdf_status = "🌐 Snapshot HTML + PDF desats"
+    elif html_saved:
+        pdf_status = "🌐 Snapshot HTML desat"
+    elif pdf_saved:
         if web_article_text:
             pdf_status = "🌐 Article web maquetat a PDF"
         else:
@@ -964,6 +1048,157 @@ tags: []
 
     # 9. Sincronitzar automàticament .kateproject en segon pla
     trigger_kate_sync()
+    return citekey
+
+def extract_singlefile_metadata(html_text, fallback_url="", fallback_title=""):
+    """Extreu URL, títol i data des de l'HTML generat per SingleFile."""
+    url = fallback_url or ""
+    title = fallback_title or ""
+    date_str = ""
+    if not url:
+        m_sf_url = re.search(r'Page saved with SingleFile\s+url:\s*(\S+)', html_text, re.I)
+        if m_sf_url:
+            url = m_sf_url.group(1).strip()
+    if not url:
+        m_canon = re.search(r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)["\']', html_text, re.I)
+        if not m_canon:
+            m_canon = re.search(r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+)["\']', html_text, re.I)
+        if m_canon:
+            url = m_canon.group(1).strip()
+    if not title:
+        m_og_title = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html_text, re.I)
+        if m_og_title:
+            title = m_og_title.group(1).strip()
+        else:
+            m_title = re.search(r'<title[^>]*>([\s\S]*?)</title>', html_text, re.I)
+            if m_title:
+                title = re.sub(r'\s+', ' ', m_title.group(1)).strip()
+    m_sf_date = re.search(r'saved date:\s*([^\r\n]+)', html_text, re.I)
+    if m_sf_date:
+        ym = re.search(r'\b(19\d\d|20\d\d)\b', m_sf_date.group(1))
+        if ym:
+            date_str = ym.group(1)
+    return url, title, date_str
+
+def run_add_paper_async(arg_val, direct_pdf=None, force_web=False):
+    """Executa add-paper en segon pla per a ingesta des d'Android / Web."""
+    def _worker():
+        cmd = [str(Path.home() / "Projects/zoterless/bin/add-paper")]
+        if force_web:
+            cmd.append("--web")
+        if direct_pdf:
+            cmd.extend(["--pdf", str(direct_pdf)])
+        if arg_val:
+            cmd.append(str(arg_val))
+        try:
+            subprocess.run(cmd, timeout=120)
+            trigger_kate_sync()
+        except Exception as e:
+            print(f"Error executant add-paper des de mòbil: {e}", file=sys.stderr)
+    threading.Thread(target=_worker, daemon=True).start()
+
+MOBILE_PWA_MANIFEST = json.dumps({
+    "name": "Zoterless & Faristol",
+    "short_name": "Zoterless",
+    "description": "Envia articles, webs i PDFs des d'Android a Zoterless i Faristol",
+    "start_url": "/mobile",
+    "display": "standalone",
+    "background_color": "#0f172a",
+    "theme_color": "#2563eb",
+    "icons": [
+        {
+            "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%232563eb'/%3E%3Ctext x='50' y='68' font-size='54' text-anchor='middle' fill='white'%3E📚%3C/text%3E%3C/svg%3E",
+            "sizes": "192x192",
+            "type": "image/svg+xml"
+        }
+    ],
+    "share_target": {
+        "action": "/ingest",
+        "method": "POST",
+        "enctype": "multipart/form-data",
+        "params": {
+            "title": "title",
+            "text": "text",
+            "url": "url",
+            "files": [
+                {
+                    "name": "file",
+                    "accept": ["application/pdf", ".pdf", "text/html", ".html", ".htm"]
+                }
+            ]
+        }
+    }
+})
+
+def render_mobile_portal_html(msg="", citekey=""):
+    faristol_btn = ""
+    if citekey:
+        faristol_btn = f'''
+        <div style="margin-top:14px;">
+            <a href="http://100.80.29.31:8080/?doc=%40{citekey}.md" style="display:inline-block;padding:10px 16px;background:#10b981;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;">📖 Obrir @{citekey} a Faristol</a>
+        </div>'''
+    alert_box = f'''
+    <div style="background:#1e293b;border-left:4px solid #10b981;padding:14px;border-radius:8px;margin-bottom:20px;color:#e2e8f0;">
+        {msg}
+        {faristol_btn}
+    </div>''' if msg else ""
+
+    return f"""<!DOCTYPE html>
+<html lang="ca">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Zoterless Mobile</title>
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#2563eb">
+    <style>
+        body {{ font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px; }}
+        .card {{ max-width: 520px; margin: 0 auto; background: #1e293b; border-radius: 14px; padding: 22px; box-shadow: 0 10px 25px rgba(0,0,0,0.4); border: 1px solid #334155; }}
+        h1 {{ font-size: 1.35rem; margin-top: 0; display: flex; align-items: center; gap: 10px; }}
+        label {{ display: block; font-size: 0.9rem; color: #cbd5e1; margin: 14px 0 6px; font-weight: 500; }}
+        input[type="text"], input[type="url"], input[type="file"] {{ width: 100%; box-sizing: border-box; padding: 12px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #f8fafc; font-size: 1rem; }}
+        .btn {{ width: 100%; padding: 13px; margin-top: 16px; border: none; border-radius: 8px; background: #2563eb; color: white; font-size: 1rem; font-weight: 600; cursor: pointer; }}
+        .btn-secondary {{ background: #334155; margin-top: 10px; display: block; text-align: center; text-decoration: none; box-sizing: border-box; }}
+        .info {{ margin-top: 22px; padding-top: 16px; border-top: 1px solid #334155; font-size: 0.85rem; color: #94a3b8; line-height: 1.5; }}
+        code {{ background: #0f172a; padding: 2px 6px; border-radius: 4px; color: #38bdf8; word-break: break-all; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>📚 Zoterless & Faristol (Tailscale)</h1>
+        {alert_box}
+        <form action="/ingest" method="POST" enctype="multipart/form-data">
+            <label>🔗 URL d'article, DOI o pàgina web:</label>
+            <input type="text" name="url" placeholder="https://... o 10.1038/...">
+
+            <label>📄 O puja un fitxer PDF / Snapshot HTML des del mòbil:</label>
+            <input type="file" name="file" accept=".pdf,.html,.htm,application/pdf,text/html">
+
+            <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer;">
+                <input type="checkbox" name="force_web" value="1">
+                Forçar captura com a pàgina web (Snapshot HTML)
+            </label>
+
+            <button type="submit" class="btn">🚀 Enviar a la Biblioteca</button>
+        </form>
+
+        <a href="http://100.80.29.31:8080" class="btn btn-secondary">📖 Obrir Faristol (:8080)</a>
+
+        <div class="info">
+            <strong>⚡ Configuració SingleFile a Firefox Android:</strong><br>
+            1. Obre les opcions de l'extensió <b>SingleFile</b> → <b>Destination</b>.<br>
+            2. Tria <b>upload to a REST Form API</b>.<br>
+            3. URL: <code>http://100.80.29.31:23119/singlefile</code><br>
+            4. Data field name: <code>file</code> | URL field name: <code>url</code>
+        </div>
+    </div>
+    <script>
+        if ('serviceWorker' in navigator) {{
+            navigator.serviceWorker.register('/sw.js').catch(function(){{}});
+        }}
+    </script>
+</body>
+</html>"""
 
 LAST_REQUEST_TIME = time.time()
 
@@ -988,7 +1223,90 @@ class ZoteroHandler(http.server.BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_cors_headers(200)
 
+    def parse_multipart_or_form(self, raw_body):
+        """Parseja multipart/form-data o application/x-www-form-urlencoded de forma directa i compatible amb LF/CRLF."""
+        ctype = self.headers.get("Content-Type", "")
+        fields = {}
+        files = {}
+        if "multipart/form-data" in ctype.lower():
+            m_b = re.search(r'boundary=([^;\s]+)', ctype, re.I)
+            if m_b:
+                boundary_str = m_b.group(1).strip('"\'')
+                boundary_bytes = ("--" + boundary_str).encode("utf-8")
+                parts = raw_body.split(boundary_bytes)
+                for part in parts[1:]:
+                    if part.startswith(b"--") or len(part.strip()) == 0:
+                        continue
+                    # Eliminar salt de línia inicial després del boundary
+                    if part.startswith(b"\r\n"):
+                        part = part[2:]
+                    elif part.startswith(b"\n"):
+                        part = part[1:]
+                    # Eliminar salt de línia final abans del següent boundary
+                    if part.endswith(b"\r\n"):
+                        part = part[:-2]
+                    elif part.endswith(b"\n"):
+                        part = part[:-1]
+
+                    # Separar capçaleres del cos de la part (suporta \r\n\r\n i \n\n)
+                    if b"\r\n\r\n" in part:
+                        hdr_bytes, payload_bytes = part.split(b"\r\n\r\n", 1)
+                    elif b"\n\n" in part:
+                        hdr_bytes, payload_bytes = part.split(b"\n\n", 1)
+                    else:
+                        continue
+
+                    hdr_text = hdr_bytes.decode("utf-8", errors="ignore")
+                    m_name = re.search(r'name=["\']?([^"\';\r\n]+)["\']?', hdr_text, re.I)
+                    if not m_name:
+                        continue
+                    name = m_name.group(1).strip()
+                    fname_m = re.search(r'filename=["\']?([^"\'\r\n]*)["\']?', hdr_text, re.I)
+                    m_ct = re.search(r'Content-Type:\s*([^\r\n;]+)', hdr_text, re.I)
+                    part_ct = m_ct.group(1).strip() if m_ct else "application/octet-stream"
+
+                    if fname_m is not None or b"<!DOCTYPE" in payload_bytes[:200] or b"<html" in payload_bytes[:200].lower() or payload_bytes.startswith(b"%PDF"):
+                        files[name] = {
+                            "filename": (fname_m.group(1).strip() if fname_m else "") or "upload.html",
+                            "content_type": part_ct,
+                            "bytes": payload_bytes
+                        }
+                    else:
+                        fields[name] = payload_bytes.decode("utf-8", errors="ignore").strip()
+        elif "application/x-www-form-urlencoded" in ctype.lower():
+            qs = parse_qs(raw_body.decode("utf-8", errors="ignore"))
+            for k, v in qs.items():
+                if v:
+                    fields[k] = v[0]
+        return fields, files
+
     def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/manifest.json":
+            self.send_cors_headers(200, "application/manifest+json; charset=utf-8")
+            self.wfile.write(MOBILE_PWA_MANIFEST.encode("utf-8"))
+            return
+
+        if parsed.path == "/sw.js":
+            self.send_cors_headers(200, "application/javascript; charset=utf-8")
+            self.wfile.write(b"self.addEventListener('fetch', function(event) {});")
+            return
+
+        if parsed.path in ("/", "/mobile", "/ingest", "/capture"):
+            qs = parse_qs(parsed.query)
+            shared_url = (qs.get("url") or qs.get("text") or [""])[0].strip()
+            force_web = (qs.get("force_web") or [""])[0] in ("1", "true", "on")
+            if shared_url:
+                m_http = re.search(r'(https?://\S+)', shared_url)
+                target_arg = m_http.group(1) if m_http else shared_url
+                run_add_paper_async(target_arg, force_web=force_web)
+                html_out = render_mobile_portal_html(f"✅ Processant en segon pla: <code>{target_arg}</code>")
+            else:
+                html_out = render_mobile_portal_html()
+            self.send_cors_headers(200, "text/html; charset=utf-8")
+            self.wfile.write(html_out.encode("utf-8"))
+            return
+
         if "/connector/ping" in self.path:
             # Si un navegador sol·licita text/html directament
             accept = self.headers.get("Accept", "")
@@ -1123,6 +1441,97 @@ class ZoteroHandler(http.server.BaseHTTPRequestHandler):
                 print(f"Error processant saveStandaloneAttachment: {e}", file=sys.stderr)
             return
 
+        if "/singlefile" in self.path or "/ingest" in self.path or "/capture" in self.path:
+            try:
+                ctype = self.headers.get("Content-Type", "").lower()
+                fields, files = self.parse_multipart_or_form(raw_body)
+
+                # Comprovar si és un fitxer pujat (SingleFile HTML o PDF compartit des d'Android)
+                file_obj = None
+                for k, v in files.items():
+                    if v.get("bytes"):
+                        file_obj = v
+                        break
+
+                url_val = fields.get("url") or fields.get("uri") or ""
+                title_val = fields.get("title") or ""
+                text_val = fields.get("text") or ""
+                force_web = fields.get("force_web", "") in ("1", "true", "on")
+
+                # Cas 1: Fitxer PDF pujat des d'Android (menú Compartir, HTTP Shortcuts, o formulari)
+                is_raw_pdf = raw_body.startswith(b"%PDF") or "application/pdf" in ctype
+                if (file_obj and (file_obj["bytes"].startswith(b"%PDF") or file_obj["filename"].lower().endswith(".pdf"))) or is_raw_pdf:
+                    pdf_bytes = file_obj["bytes"] if file_obj else raw_body
+                    orig_fname = file_obj["filename"] if file_obj else (self.headers.get("X-Filename") or "shared_mobile.pdf")
+                    tmp_pdf = Path(f"/tmp/mobile_shared_{int(time.time()*1000)}.pdf")
+                    tmp_pdf.write_bytes(pdf_bytes)
+                    guessed_title = title_val or extract_title_guess_from_pdf(tmp_pdf, fallback_filename=orig_fname)
+                    print(f"📱 Android: rebut PDF compartit ({orig_fname}) -> títol deduït: {guessed_title}", file=sys.stderr)
+                    item = {
+                        "itemType": "journalArticle",
+                        "title": guessed_title,
+                        "url": f"file://{tmp_pdf.resolve()}",
+                        "attachments": [{"url": f"file://{tmp_pdf.resolve()}", "mimeType": "application/pdf"}]
+                    }
+                    threading.Thread(target=process_zotero_item, args=(item,), daemon=True).start()
+                    if "/singlefile" in self.path and "text/html" not in self.headers.get("Accept", ""):
+                        self.send_cors_headers(200)
+                        self.wfile.write(b'{"success":true}')
+                    else:
+                        self.send_cors_headers(200, "text/html; charset=utf-8")
+                        self.wfile.write(render_mobile_portal_html(f"📄 PDF rebut des del mòbil (<code>{orig_fname}</code>). Extreient DOI/metadades i creant nota...").encode("utf-8"))
+                    return
+
+                # Cas 2: Fitxer HTML pujat (extensió SingleFile a Firefox Android o fitxer .html)
+                html_snap = ""
+                if file_obj and file_obj["bytes"]:
+                    html_snap = file_obj["bytes"].decode("utf-8", errors="ignore")
+                elif "text/html" in ctype or body.lstrip().lower().startswith(("<!doctype", "<html", "<!--")):
+                    html_snap = body
+                else:
+                    for fk, fv in fields.items():
+                        if isinstance(fv, str) and ("<!doctype" in fv.lower() or "<html" in fv.lower() or len(fv) > 500):
+                            html_snap = fv
+                            break
+
+                print(f"📥 /singlefile debug: ctype={ctype}, len={len(raw_body)}, files={list(files.keys())}, fields={list(fields.keys())}, html_len={len(html_snap)}", file=sys.stderr)
+
+                if html_snap and ("<html" in html_snap.lower() or "<!doctype" in html_snap.lower() or len(html_snap) > 300):
+                    sf_url, sf_title, sf_date = extract_singlefile_metadata(html_snap, fallback_url=url_val, fallback_title=title_val)
+                    print(f"📱 SingleFile (Android/Firefox): rebut snapshot HTML per a {sf_url or sf_title}", file=sys.stderr)
+                    item = {
+                        "itemType": "webpage",
+                        "title": sf_title or "Snapshot Web",
+                        "url": sf_url,
+                        "html": html_snap,
+                        "date": sf_date
+                    }
+                    threading.Thread(target=process_zotero_item, args=(item,), daemon=True).start()
+                    if "/singlefile" in self.path and "text/html" not in self.headers.get("Accept", ""):
+                        self.send_cors_headers(200)
+                        self.wfile.write(b'{"success":true}')
+                    else:
+                        self.send_cors_headers(200, "text/html; charset=utf-8")
+                        self.wfile.write(render_mobile_portal_html(f"🌐 Snapshot SingleFile rebut: <b>{sf_title or sf_url}</b>. Desant HTML + PDF + Nota...").encode("utf-8"))
+                    return
+
+                # Cas 3: URL o DOI compartit des del menú Compartir d'Android o formulari
+                shared_target = url_val or text_val
+                if shared_target:
+                    m_http = re.search(r'(https?://\S+)', shared_target)
+                    target_arg = m_http.group(1) if m_http else shared_target.strip()
+                    print(f"📱 Android: rebut enllaç/DOI compartit ({target_arg})", file=sys.stderr)
+                    run_add_paper_async(target_arg, force_web=force_web)
+                    self.send_cors_headers(200, "text/html; charset=utf-8")
+                    self.wfile.write(render_mobile_portal_html(f"🔗 Enllaç rebut: <code>{target_arg}</code>. Processant amb Zoterless...").encode("utf-8"))
+                    return
+
+            except Exception as e:
+                print(f"Error processant /singlefile o /ingest: {e}", file=sys.stderr)
+                self.send_cors_headers(500)
+                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+                return
+
         self.send_cors_headers(200)
         self.wfile.write(b'{"success":true}')
 
@@ -1171,11 +1580,11 @@ def run():
     sock = get_systemd_socket()
     if sock is not None:
         print(f"📡 Servidor Zotero Receiver activat via systemd socket (fd 3)...", file=sys.stderr)
-        server = SystemdThreadingTCPServer(("127.0.0.1", PORT), ZoteroHandler, inherited_socket=sock)
+        server = SystemdThreadingTCPServer(("0.0.0.0", PORT), ZoteroHandler, inherited_socket=sock)
         start_idle_watchdog(server)
     else:
-        print(f"📡 Servidor Zotero Receiver escoltant a http://127.0.0.1:{PORT}...", file=sys.stderr)
-        server = SystemdThreadingTCPServer(("127.0.0.1", PORT), ZoteroHandler)
+        print(f"📡 Servidor Zotero Receiver escoltant a http://0.0.0.0:{PORT}...", file=sys.stderr)
+        server = SystemdThreadingTCPServer(("0.0.0.0", PORT), ZoteroHandler)
 
     with server:
         try:

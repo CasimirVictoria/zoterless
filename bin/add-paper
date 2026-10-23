@@ -1404,12 +1404,22 @@ def process_web_article(url):
     citekey = generate_citekey(first_author_clean, title, year)
 
     target_pdf = PDF_DIR / f"{citekey}.pdf"
+    target_html = PDF_DIR / f"{citekey}.html"
     note_path = NOTES_DIR / f"@{citekey}.md"
 
-    if key_exists_in_bib(citekey, BIB_FILE) and target_pdf.is_file() and note_path.is_file():
+    if key_exists_in_bib(citekey, BIB_FILE) and (target_pdf.is_file() or target_html.is_file()) and note_path.is_file():
         notify("Biblioteca", f"ℹ️ L'article web ja existeix a la biblioteca:\n@{citekey}")
         print(f"ℹ️ L'article web ja existeix a la biblioteca: @{citekey}")
         return True
+
+    html_saved = False
+    if downloaded and len(downloaded.strip()) > 200:
+        try:
+            PDF_DIR.mkdir(parents=True, exist_ok=True)
+            target_html.write_text(downloaded, encoding="utf-8")
+            html_saved = True
+        except Exception as e:
+            print(f"⚠️ No s'ha pogut desar l'snapshot HTML: {e}", file=sys.stderr)
 
     doc_title = title.replace('"', '\\"')
     doc_author = author_str.replace('"', '\\"')
@@ -1481,7 +1491,7 @@ mainfont: "DejaVu Serif"
         "year": year,
         "journal": journal,
         "url": url,
-        "file": str(target_pdf) if pdf_saved else ""
+        "file": str(target_pdf) if pdf_saved else (str(target_html) if html_saved else "")
     }
     if not key_exists_in_bib(citekey, BIB_FILE):
         lines = [f"@online{{{citekey},"]
@@ -1512,13 +1522,23 @@ tags: []
 {extra_article}"""
         note_path.write_text(note_content, encoding="utf-8")
 
-    pdf_status = "🌐 Article web maquetat a PDF" if pdf_saved else "⚠️ Sense PDF"
+    if pdf_saved and html_saved:
+        pdf_status = "🌐 Snapshot HTML + PDF maquetat"
+    elif html_saved:
+        pdf_status = "🌐 Snapshot HTML desat"
+    elif pdf_saved:
+        pdf_status = "🌐 Article web maquetat a PDF"
+    else:
+        pdf_status = "⚠️ Sense PDF ni HTML"
     short_title = clean_latex(title)[:57] + "..." if len(clean_latex(title)) > 60 else clean_latex(title)
     notify(f"📚 Article web afegit: @{citekey}", f"{short_title}\n{pdf_status} | 📝 Nota creada")
     print(f"✅ Article web afegit amb èxit: @{citekey}")
     print(f"   Títol: {short_title}")
     print(f"   Estat: {pdf_status}")
-    print(f"   PDF: {target_pdf}")
+    if html_saved:
+        print(f"   Snapshot HTML: {target_html}")
+    if pdf_saved:
+        print(f"   PDF: {target_pdf}")
     print(f"   Nota: {note_path}")
     return True
 

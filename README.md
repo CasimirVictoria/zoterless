@@ -1,7 +1,7 @@
 # ⚡ zoterless
 
-> **Zero RAM, Zero SQLite, Zero Electron/Gecko. 100% Zotero Connector Compatible.**  
-> *Una suite acadèmica minimalista basada en fitxers plans per a Linux (KDE Plasma, Kate, Okular).*
+> **Zero RAM en repòs (Socket Activation), Zero SQLite, Zero Electron/Gecko. 100% Zotero Connector Compatible.**  
+> *Una suite acadèmica sobirana i minimalista basada en fitxers plans per a Linux (KDE Plasma 6, Kate, Okular, Faristol).*
 
 ---
 
@@ -14,11 +14,11 @@ Després d'acabar configurant al llarg dels anys una pila de treball molt concre
 3. **ZotMoov (o ZotFile):** El plugin imprescindible per extreure els fitxers de la base de dades interna, reanomenar automàticament els PDFs amb la citekey estàndard i moure'ls a la nostra carpeta de documents.
 4. **Better Notes (Exportació Markdown):** El plugin per generar automàticament una plantilla de notes estructurada en Markdown amb metadades YAML i enllaços per a cada nova referència.
 
-Em vaig plantejar poder implementar aquest fluxe de manera senzilla, adaptant-lo a les meus necessitats específiques, emprant les eines que més solc emprar (el navegador web firefox i l'editor kate).
+Em vaig plantejar poder implementar aquest flux de manera senzilla, adaptant-lo a les meues necessitats específiques, emprant les eines que més solc utilitzar (el navegador web Firefox/Falkon i l'editor Kate).
 
 ### 💥 La Paradoxa de la Pila Clàssica
 
-Per gaudir d'aquestes 4 funcionalitats essencials, havia de:
+Per gaudir d'aquestes 4 funcionalitats essencials, calia:
 
 - Mantindre oberta permanentment una aplicació feixuga de més de **500 MB de RAM** (Zotero Desktop, construït sobre el motor Gecko/Firefox i una base de dades SQLite opaca).
 - Configurar i mantindre **3 extensions de tercers en JavaScript**, que sovint es desincronitzen o es trenquen amb cada actualització major de Zotero (com va passar dolorosament amb el salt a Zotero 7).
@@ -27,8 +27,10 @@ Per gaudir d'aquestes 4 funcionalitats essencials, havia de:
 
 **`zoterless` aglutina i fon aquestes 4 peces en un sol servei autònom de 0 MB de RAM en repòs (mitjançant Systemd Socket Activation)**, sense dependències opaques:
 
-- **100% Compatible amb Zotero Connector:** Continuem fent clic a la icona oficial del navegador a Firefox. L'extensió envia la petició HTTP al port local `23119`, i `zotero-receiver` s'activa instantàniament a demanda i li respon amb el protocol natiu de Zotero.
-- **Better BibTeX natiu:** Resolució de metadades canòniques via Crossref/DOI i escriptura directa a `~/Documents/Biblioteca/biblioteca.bib`.
+- **100% Compatible amb Zotero Connector:** Continuem fent clic a la icona oficial del navegador a Firefox, Chrome o Brave. L'extensió envia la petició HTTP al port local `23119`, i `zotero-receiver` s'activa instantàniament a demanda i li respon amb el protocol natiu de Zotero.
+- **Suport per a navegadors sense extensions (Falkon):** Mitjançant `zoterless-capture-paper` i `zoterless-capture-web`, integrat amb dreceres globals de teclat a l'escriptori.
+- **Maquetació d'Articles Web a PDF (XeLaTeX):** Converteix articles de premsa, blogs i pàgines web (`saveSnapshot`, `saveSingleFile`) en **PDFs elegants d'alta qualitat tipogràfica** compilats amb XeLaTeX i la seua corresponent fitxa Markdown.
+- **Better BibTeX natiu:** Resolució de metadades canòniques via Crossref/OpenAlex/DOI i escriptura directa a `~/Documents/Biblioteca/biblioteca.bib`.
 - **ZotMoov natiu:** Descàrrega directa de PDFs en accés obert (Unpaywall, Dialnet, DSpace) o escaneig automàtic a `~/Downloads`, reanomenant a `{citekey}.pdf` a la carpeta `pdfs/`.
 - **Better Notes natiu:** Creació immediata de la fitxa de recerca en Markdown amb frontmatter YAML a `~/Documents/notes/@{citekey}.md`.
 
@@ -41,8 +43,10 @@ Per gaudir d'aquestes 4 funcionalitats essencials, havia de:
 | **Zotero Connector** *(extensió navegador)* | **Zotero Connector** *(el mantenim!)* | Captura de metadades i PDFs al navegador en un sol clic. |
 | **Zotero Desktop** *(~500 MB RAM, SQLite, Gecko)* | **`zotero-receiver`** *(0 MB RAM en repòs via Socket Activation)* | Servidor HTTP natiu en Python activat a demanda al port `23119`. |
 | **Plugin Better BibTeX** *(motor JS intern)* | **Natiu a `zoterless`** | Citekeys canòniques (`autorTitolAny`) i escriptura a `biblioteca.bib`. |
-| **Plugins ZotMoov / ZotFile** *(reanomenar PDFs)* | **Natiu a `zoterless`** | Descàrrega directa d'Unpaywall o detecció automàtica a `~/Downloads`. |
+| **Plugins ZotMoov / ZotFile** *(reanomenar PDFs)* | **Natiu a `zoterless`** | Descàrrega directa d'Unpaywall, Dialnet o detecció automàtica a `~/Downloads`. |
 | **Plugins Better Notes / Markdown** | **Natiu a `zoterless`** | Creació immediata de la plantilla de notes a `notes/@{citekey}.md`. |
+| **Captura de webs a HTML desordenat** | **Natiu a `zoterless` (XeLaTeX)** | Converteix pàgines i articles web en PDFs tipogràficament impecables. |
+| **Navegador Falkon sense webextensions** | **`zoterless-capture-paper/web`** | Captura instantània via xdotool/clipboard amb dreceres de teclat. |
 | **VS Code + Extensions Zotero** *(cercador de cites)* | **`kate-citar`** *(PyQt6 natiu per a Kate a Plasma 6)* | Cercador instantani de referències per inserir `@citekey` al cursor. |
 | **Visor de PDFs intern de Zotero** | **`kate-citar-actions` + Okular** | Salt directe a la pàgina exacta i ressaltat de citació a Okular. |
 
@@ -51,74 +55,76 @@ Per gaudir d'aquestes 4 funcionalitats essencials, havia de:
 ## 🏗️ Arquitectura del Sistema
 
 ```mermaid
-flowchart LR
-    subgraph Navegador
-        Web["Navegador (Firefox)"]
-        Ext["Zotero Connector"]
-        Web --> Ext
+flowchart TD
+    subgraph Ingesta ["1. CAPA D'INGESTA MULTICANAL"]
+        Firefox["Firefox / Chrome (Zotero Connector)"]
+        Falkon["Falkon / CLI (zoterless-capture-paper/web)"]
+        CLI["add-paper (CLI multilingüe Argos)"]
+        Upload["Pujada directa de PDFs (pdfinfo + pdftotext)"]
     end
 
-    subgraph zoterless ["zoterless Daemon (Port 23119)"]
-        Receiver["zotero-receiver (Python, 24MB)"]
-        Crossref["Resolució DOI / Crossref"]
-        OA["Unpaywall API / Downloads Scanner"]
-        Receiver --> Crossref
-        Receiver --> OA
+    subgraph Daemon ["2. DIMONI ZOTERLESS (Socket Activation)"]
+        Socket["zotero-receiver.socket (0 MB RAM)"] --> Receiver["zotero-receiver (Port 23119)"]
+        Receiver --> Engine["Motor de resolució canònica (Crossref, OpenAlex, Dialnet)"]
+        Receiver --> OA["Cascada OA (Unpaywall, Repositoris DSpace, Playwright)"]
+        Receiver --> Latex["Compilador XeLaTeX (Articles Web a PDF)"]
     end
 
-    subgraph PlainFiles ["Fitxers Plans (Single Source of Truth)"]
+    subgraph Truth ["3. FONT DE VERITAT (Text Pla Estàndard)"]
         Bib["~/Documents/Biblioteca/biblioteca.bib"]
-        PDF["~/Documents/Biblioteca/pdfs/{citekey}.pdf"]
+        PDFs["~/Documents/Biblioteca/pdfs/{citekey}.pdf"]
         Notes["~/Documents/notes/@{citekey}.md"]
     end
 
-    subgraph Escriptori ["Flux de Treball (KDE / Kate / Okular)"]
-        Kate["Editor Kate (@citekey)"]
-        Actions["kate-citar-actions"]
-        Okular["Visor Okular"]
-        
-        Kate --> Actions
-        Actions --> Okular
-        Actions --> Notes
+    subgraph Workbenches ["4. BANCS DE TREBALL I LECTURA"]
+        Faristol["Faristol Workbench (Web / PWA)"]
+        Kate["KDE Kate (kate-citar PyQt6 + .kateproject)"]
+        Okular["Visor Okular (kate-citar-actions)"]
     end
 
-    Ext -->|HTTP POST| Receiver
-    Crossref --> Bib
-    OA --> PDF
-    Receiver --> Notes
-    Bib -.-> Kate
+    Firefox --> Socket
+    Falkon --> Socket
+    CLI --> Truth
+    Upload --> Socket
+
+    Receiver --> Truth
+    Truth <--> Faristol
+    Truth <--> Kate
+    Truth <--> Okular
 ```
 
 ---
 
 ## ✨ Funcionalitats Clau
 
-1. **100% Compatible amb Zotero Connector:**
-   Fes clic a la icona oficial del Zotero Connector a Firefox com sempre. No cal tindre Zotero obert ni instal·lat.
-2. **Resolució intel·ligent de DOI & Metadades Canòniques:**
-   Quan afegeixes un article des de catàlegs de biblioteques (com Trobes UV, Primo VE, Dialnet) on les dades solen arribar incompletes, `zoterless` neteja el títol, consulta l'API de Crossref i obté les metadades oficials i canòniques de la revista.
-3. **Descàrrega automàtica de PDFs en Accés Obert:**
-   Mitjançant la integració nativa amb l'API d'**Unpaywall**, descarrega automàticament el PDF lliure i el reanomena a `pdfs/{citekey}.pdf`.
-4. **Detecció intel·ligent a `~/Downloads`:**
-   Si l'article requereix accés per subscripció universitària (EduVPN) i el descarregues tu mateix, `zoterless` examina els PDFs recents a la teua carpeta de descàrregues, n'analitza la primera pàgina amb `pdftotext` i l'associa automàticament.
-5. **Captura des del visor de PDFs de Firefox:**
-   Si estàs veient un PDF en línia o un fitxer local `file:///...` al navegador, només has de prémer la icona de Zotero Connector: el sistema n'extrau el DOI de la capçalera i en registra totes les metadades.
-6. **Normalització Unicode (NFKD):**
-   Els cognoms i títols amb accents (`Cáceres`, `innovación`) es transliteren de manera natural (`caceresTendenciasInnovacion...`) sense perdre caràcters ni corrompre les claus BibTeX.
-7. **Notificacions Natives KDE:**
-   Notificació d'escriptori immediata mitjançant `notify-send` informant de la citekey, l'estat del PDF i la nota creada.
+1. **Zero RAM en repòs (Systemd Socket Activation):**
+   Mitjançant `zotero-receiver.socket`, el sistema no manté cap procés en segon pla consumint memòria. En rebre una petició HTTP al port `23119`, systemd desperta el dimoni en mil·lisegons, processa la referència i torna a l'estat de repòs.
+2. **100% Compatible amb Zotero Connector:**
+   Fes clic a la icona oficial del Zotero Connector a Firefox, Chrome o Brave com sempre. No cal tindre Zotero Desktop instal·lat ni obert.
+3. **Suport per a Falkon i entorns minimalistes:**
+   Els scripts `zoterless-capture-paper` i `zoterless-capture-web` permeten capturar articles i pàgines web des de navegadors lleugers com Falkon mitjançant dreceres de teclat globals o ordres de terminal.
+4. **Articles Web a XeLaTeX PDF:**
+   Quan es desa una pàgina web (`/connector/saveSnapshot` o `saveSingleFile`), `zoterless` en neteja el contingut, extreu metadades i el compila amb **XeLaTeX** en un PDF maquetat d'alta resolució, integrat a la carpeta de PDFs i a la base de dades.
+5. **Ingesta de fitxers PDF locals:**
+   Permet enviar fitxers PDF directament al receptor: n'inspecciona el contingut mitjançant `pdfinfo` i `pdftotext`, extreu el DOI o en dedueix el títol, i resol la referència canònica a Crossref/OpenAlex.
+6. **Resolució d'Accés Obert Multi-Ubicació (Unpaywall + Repositoris):**
+   Itera sobre totes les rèpliques d'accés obert disponibles, prioritzant servidors universitaris (RODERIC, RiuNet, Zenodo, HAL, PMC) per sobre de servidors comercials bloquejats per sistemes antibot.
+7. **Normalització Unicode (NFKD):**
+   Els cognoms i títols amb accents (`Cáceres`, `innovación`) es transliteren de manera natural (`caceresTendenciasInnovacion...`) sense caràcters estranys ni corrupció de claus BibTeX.
+8. **Integració nativa amb KDE Plasma 6 i Kate:**
+   Inclou `kate-citar` (selector de referències escrit en **PyQt6**) i `kate-sync-project` per actualitzar automàticament el projecte de Kate i permetre citar a l'instant.
 
 ---
 
 ## 📂 Estructura de Fitxers
 
-`zoterless` organitza la teua biblioteca estrictament en fitxers estàndard:
+`zoterless` organitza la teua biblioteca estrictament en fitxers estàndard de text pla:
 
 ```text
 ~/Documents/
 ├── Biblioteca/
 │   ├── biblioteca.bib          # Base de dades canònica en text pla
-│   └── pdfs/
+│   └── pdfs/                   # PDFs organitzats per citekey
 │       ├── pont-niclosCreativityArtificialIntelligence2024.pdf
 │       ├── berzosaInteligenciaArtificialPensamiento2025.pdf
 │       └── caceresTendenciasInnovacionCurricular2026.pdf
@@ -140,7 +146,7 @@ flowchart LR
 ### 1. Requisits previs (Debian / Ubuntu / Kubuntu)
 
 ```bash
-sudo apt install python3 python3-pyqt5 curl poppler-utils libnotify-bin
+sudo apt install python3 python3-pyqt6 curl poppler-utils libnotify-bin texlive-xetex pandoc
 ```
 
 ### 2. Clonar i instal·lar
@@ -153,16 +159,103 @@ chmod +x install.sh
 ```
 
 L'instal·lador:
-
-- Copia els binaris a `~/.local/bin/`.
-- Configura i activa el servei d'usuari a `systemd` (`zotero-receiver.service`).
-- El servei arrenca automàticament a cada inici de sessió consumint només **~24 MB**.
+- Enllaça els binaris a `~/.local/bin/` (`zotero-receiver`, `add-paper`, `kate-citar`, `kate-citar-actions`, `kate-sync-project`, `zoterless-capture-paper`, `zoterless-capture-web`).
+- Configura i activa `zotero-receiver.socket` a `systemd --user`.
+- **En repòs el consum és de 0 MB de RAM.**
 
 ---
 
-## ⚙️ Integració amb l'Editor Kate
+## 🛠️ El Company de Consola: `add-paper`
 
-Per a una experiència de recerca fluida a KDE Plasma:
+Per a una experiència completa des del terminal, cerca federada o integració amb el portapapers, `zoterless` inclou el potent gestor **`add-paper`**:
+
+```bash
+# Ingesta per DOI o URL
+add-paper 10.1016/j.compedu.2023.104845
+
+# Cerca federada interactiva en 35 bases de dades (amb traducció local Argos):
+add-paper -s "pensament computacional en educació primària"
+
+# Compilació d'articles web a PDF d'alta qualitat (XeLaTeX):
+add-paper -w https://cacm.acm.org/magazines/2024/2/computational-thinking/fulltext
+
+# Connexió automàtica a EduVPN UV abans de la descàrrega:
+add-paper --vpn 10.1016/j.compedu.2023.104845
+
+# Captura autònoma des del portapapers (Wayland/X11):
+add-paper
+```
+
+📖 **Consulta el [Manual Complet de add-paper](docs/add-paper.md)** per conèixer totes les opcions de línia d'ordres, llançadors d'escriptori i dreceres globals.
+
+---
+
+## 📱 Captura Remota des d'Android (mitjançant Tailscale)
+
+Gràcies a la connexió xifrada punt a punt de **Tailscale**, pots enviar articles científics, pàgines web i PDFs des del teu telèfon mòbil directament cap a la biblioteca de l'ordinador estigues on estigues (amb dades 4G/5G, a la universitat o viatjant), **sense obrir ports al router ni exposar el teu ordinador a la xarxa pública**.
+
+`zotero-receiver` incorpora un portal mòbil natiu i compatibilitat amb **Web Share Target (PWA)**:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     ANDROID VIA TAILSCALE                   │
+│                                                             │
+│   Navegador / PDF / Apps          Extensió SingleFile       │
+│      Menú "Compartir..."          (Firefox Android)         │
+│               │                            │                │
+│               ▼                            ▼                │
+│       [Zoterless PWA]            REST API: /singlefile      │
+└───────────────┼────────────────────────────┼────────────────┘
+                │   (Xarxa segura WireGuard) │
+                └──────────────┬─────────────┘
+                               ▼
+            ┌────────────────────────────────────┐
+            │   zotero-receiver (:23119)         │
+            │   - Resolució DOI / Crossref       │
+            │   - Descàrrega PDF / XeLaTeX Web   │
+            │   - Escriptura a biblioteca.bib    │
+            │   - Generació de notes/@citekey.md │
+            └────────────────────────────────────┘
+```
+
+### 1. Menú natiu «Compartir...» d'Android (Web Share Target / Hermit)
+1. Obre `http://<IP-Tailscale>:23119` a Chrome, Firefox o millor com a **Lite App a Hermit**.
+2. Afegeix-la a la pantalla d'inici com a aplicació web instal·lable (PWA).
+3. **El superpoder:** Zoterless s'enregistra al sistema operatiu com a destinació directa al menú **«Compartir...» d'Android**.
+4. Sempre que estigues llegint un article a qualsevol app (xarxes, premsa, correu, Telegram, lector de documents o navegador):
+   - Toca **«Compartir»** → Selecciona **«Zoterless & Faristol»**.
+   - Zoterless rep l'enllaç o el document en segon pla, resol el BibTeX canònic, en descarrega el PDF en accés obert, en crea la nota `@citekey.md` i t'envia la confirmació.
+
+### 2. Portal Web Mòbil Dedicat (`/mobile`)
+En obrir `http://<IP-Tailscale>:23119/` des del mòbil tens accés a una consola tàctil neta:
+- **Camp directe per a URL o DOI:** enganxa qualsevol enllaç acadèmic o codi `10.xxxx/...` i prem *«Enviar a la Biblioteca»*.
+- **Pujada directa de fitxers PDF:** puja qualsevol PDF emmagatzemat al mòbil; el servidor n'extraurà el DOI per `pdfinfo`/`pdftotext`, n'obtindrà les metadades oficials i l'arxivarà.
+- **Accés directe amb un toc a Faristol:** botó per saltar a la teua biblioteca de lectura a `http://<IP-Tailscale>:8080`.
+
+### 3. Captura Dual d'Articles Web amb SingleFile (HTML fidel + PDF XeLaTeX)
+L'extensió **SingleFile** per a Firefox Android permet capturar articles de premsa, blogs i portals web generant simultàniament **dues versions documentals complementàries**:
+
+1. **Configuració ràpida a Firefox Android:**
+   - Obre les opcions de SingleFile (**Complements** ➔ **SingleFile** ➔ **Opcions**).
+   - A la secció **Destination (Destinació)**: Tria **Upload to a REST Form API**.
+   - **URL de destinació:** `http://<IP-Tailscale>:23119/singlefile`
+   - **Camp de fitxer (Data field name):** `file`
+   - **Camp d'URL (URL field name):** `url`
+   - **Mètode HTTP:** `POST`
+2. **Generació simultània triple:**
+   - En tocar la icona de SingleFile al telèfon mòbil, `zoterless` processa la captura i genera:
+     * **Snapshot HTML autèntic (`pdfs/{citekey}.html`):** arxiu web autocontingut complet amb imatges, fonts i maquetació original.
+     * **Versió PDF XeLaTeX (`pdfs/{citekey}.pdf`):** compilat tipogràfic net per a impressió o lectura e-ink.
+     * **Nota Markdown (`notes/@{citekey}.md`):** amb el text extret, resum i metadades YAML.
+     * **Registre canònic a `biblioteca.bib`:** amb ambdues fonts indexades.
+3. **Lectura, subratllat i sincronització a Faristol:**
+   - A **Faristol** (`:8080`), l'Snapshot HTML es visualitza directament al panell central.
+   - Pots **subratllar text** (persistent amb `mark.faristol-highlight`) i prémer **«Citar»** al menú flotant per injectar fragments directament a la teua nota.
+   - Les citacions a la nota mantenen un **enllaç dinàmic bidireccional**: en fer-hi clic, Faristol fa scroll suau fins al paràgraf exacte de l'HTML.
+
+---
+
+## ⚙️ Integració amb l'Editor Kate (KDE Plasma 6)
 
 ### 1. Inserir citació (`kate-citar`)
 
@@ -170,7 +263,7 @@ Per a una experiència de recerca fluida a KDE Plasma:
 - **Nom:** `Citar BibTeX`
 - **Ordre:** `kate-citar`
 - **Drecera recomanada:** `Ctrl+Alt+C`
-- En prémer la drecera, s'obre un cercador ràpid en PyQt5. En triar una entrada i prémer `Enter`, s'insereix `@citekey` directament al text.
+- En prémer la drecera, s'obre un cercador ràpid en PyQt6. En triar una entrada i prémer `Enter`, s'insereix `@citekey` directament al text.
 
 ### 2. Menú d'accions contextuals (`kate-citar-actions`)
 
@@ -178,142 +271,35 @@ Per a una experiència de recerca fluida a KDE Plasma:
 - **Nom:** `Accions de Citació`
 - **Ordre:** `kate-citar-actions %{Document:Selection:Text}`
 - **Drecera recomanada:** `Ctrl+Alt+O`
-- Situa el cursor sobre qualsevol `@citekey` (o selecciona-la):
+- Situa el cursor sobre qualsevol `@citekey`:
   - **Obrir PDF:** Obre el PDF canònic a **Okular**.
   - **Obrir Nota:** Obre la nota Markdown (`@{citekey}.md`) en una pestanya de **Kate**.
 
 ---
 
-## 🛠️ Eines Addicionals
-
-### `add-paper`: Gestor CLI i Cerca Federada Multilingüe
-
-Permet afegir articles i cercar literatura acadèmica directament des del terminal o el portapapers (Wayland/X11):
-
-```bash
-# 1. Cerca federada multilingüe (OpenAlex, ERIC, Crossref, Dialnet) amb Argos Translate:
-#    Tradueix localment català -> anglès (ERIC, OpenAlex, Crossref) i castellà (Dialnet),
-#    executa cerques en paral·lel, deduplica resultats i mostra fonts combinades:
-add-paper -s "pensament computacional a primària"
-
-# 2. Afegir directament per DOI, arXiv o URL de repositori (Dialnet, RODERIC, RiuNet, etc.):
-add-paper 10.18172/con.6302
-add-paper https://arxiv.org/abs/2301.00001
-add-paper https://dialnet.unirioja.es/servlet/articulo?codigo=6327318
-
-# 3. Descàrrega directa especificant la URL del PDF (descoberta per cercadors o repositoris):
-add-paper --pdf-url https://dialnet.unirioja.es/descarga/articulo/6327318.pdf 10.18172/con.6302
-
-# 4. Connectar automàticament a EduVPN UV abans de la descàrrega per a articles de pagament:
-add-paper --vpn 10.1016/j.compedu.2023.104845
-
-# 5. Mode autònom des del portapapers (llegeix automàticament el text copiat):
-add-paper
-```
-
-### 🔍 Resolució en Accés Obert Multi-Ubicació (100% Legal)
-
-Tant `zotero-receiver` (en fer clic al navegador) com `add-paper` incorporen una cascada de descàrrega legal d'alta precisió:
-1. **Unpaywall Multi-Location:** Itera sobre la totalitat de `oa_locations` del registre, prioritzant les versions allotjades en dipòsits institucionals universitaris (RODERIC UV, RiuNet UPV, Zenodo, PubMed Central) per sobre de les còpies d'editorial sovint bloquejades.
-2. **OpenAlex API (250M+ obres):** Resolució alternativa d'accés obert creuant metadades a través de `best_oa_location`, `primary_location` i `locations`.
-3. **Repositoris Nacionals i OJS:** Descàrrega directa des de dominis universitaris espanyols (Dialnet, CSIC, RACO, TDX).
-
-### 🔒 Detecció Institucional d'EduVPN
-
-Quan un article pertany a una editorial sota subscripció (ScienceDirect, Springer, Wiley, IEEE, etc.) i no té PDF lliure en accés obert, `zoterless` comprova l'estat d'EduVPN (`nmcli`):
-
-- Si la VPN institucional no està activa, envia una notificació suggerint connectar-la (`nmcli con up eduvpn`).
-- Suporta descàrrega directa a través del túnel VPN WireGuard un cop connectat.
-
----
-
 ## 🧬 Ecosistema i Integració: zoterless + Faristol + mcp-server-academic-spain
 
-`zoterless` està dissenyat segons la **filosofia UNIX: fes una sola cosa i fes-la a la perfecció**. En lloc de convertir-se en un monòlit que ho faça tot, s'integra de forma nativa i desacoblada amb **[Faristol](https://github.com/CasimirVictoria/faristol)** (el banc de treball de lectura, anotació de PDFs i notes bibliogràfiques) i amb **[mcp-server-academic-spain](https://github.com/CasimirVictoria/mcp-server-academic-spain)** (el servidor MCP de cerca acadèmica federada en 35 bases de dades i repositoris):
+`zoterless` forma part d'un ecosistema sobirà dissenyat segons la **filosofia UNIX**:
 
-```mermaid
-flowchart TD
-    subgraph Ingesta ["CAPA D'INGESTA MULTICANAL"]
-        Firefox["Firefox + Zotero Connector"] --> Receiver["zotero-receiver (Port 23119)"]
-        CLI["add-paper (CLI multilingüe Argos)"]
-        MCP["mcp-server-academic-spain (35 bases de dades / IA)"]
-    end
-
-    subgraph Truth ["FONT DE VERITAT (Text Pla Estàndard)"]
-        Bib["~/Documents/Biblioteca/biblioteca.bib"]
-        PDFs["~/Documents/Biblioteca/pdfs/{citekey}.pdf"]
-        Notes["~/Documents/notes/@{citekey}.md"]
-    end
-
-    subgraph PKM ["CAPA DE LECTURA I ANOTACIÓ (Faristol)"]
-        FaristolWeb["Faristol Workbench (PDF.js + Vditor + Cites Pandoc)"]
-        NotebookLM["NotebookLM Studio (IA RAG sobre Documents)"]
-        Kate["Editor Kate (@citekey / kate-citar)"]
-    end
-
-    Receiver --> Truth
-    CLI --> Truth
-    MCP -->|save_to_library| Truth
-
-    Truth <--> FaristolWeb
-    Truth <--> NotebookLM
-    Truth <--> Kate
-```
-
-### 🔄 El Cicle Virtuós del Motor Compartit: Una Sola Font de Veritat
-
-Un dels avantatges arquitectònics més potents d'aquest ecosistema és que **la intel·ligència de cerca, extracció de metadades i descàrrega en accés obert mai no es duplica**:
-
-1. **El motor és únic:** `add-paper` importa directament les llibreries del motor unificat de `mcp-server-academic-spain` (`platforms.engine`).
-2. **Propagació instantània de millores:** Quan trobem i resolem un cas límit al motor (com esquivar el repte antibot de *Cloudflare/Fastly* d'editorials com Springer rastrejant rèpliques a repositoris universitaris d'Unpaywall/OpenAlex, o afegir nous cercadors com DOAJ, DBLP, DOGV, Recolecta o BioMCP):
-   - **L'agent d'IA (Antigravity/Claude/Cursor)** gaudeix immediatament de la millora durant les sessions de recerca.
-   - **La línia de comandes (`add-paper`)** n'obté el benefici automàticament sense tocar cap línia de codi.
-   - **Faristol Web** veu reflectida la nova capacitat a la pestanya de cerca sense haver de modificar la seua interfície.
-3. **Validació contínua (*Dogfooding*):** La recerca assistida per IA posa a prova diàriament els 35 connectors contra canvis en llocs web i restriccions d'accés; cada cop que afinem el motor, tot el teu escriptori local de treball queda automàticament reforçat.
-
-### Com es comuniquen els projectes:
-
-1. **Font de veritat única en text pla:**
-   - Tots els components comparteixen exactament els mateixos fitxers: `biblioteca.bib` per a les referències BibTeX, la carpeta `pdfs/{citekey}.pdf` per als documents, i `notes/@{citekey}.md` per a les fitxes d'estudi amb frontmatter YAML.
-2. **Ingesta transparent per a Faristol:**
-   - Quan fas clic a la icona de Zotero Connector a Firefox, `zotero-receiver` processa la descàrrega, genera la referència BibTeX i crea la nota `@citekey.md`. Quan obris o recarregues `Faristol`, tant el PDF com la seua nota d'estudi apareixen a l'instant llestos per a la lectura.
-3. **Cerca i importació des de Faristol:**
-   - La interfície web de `Faristol` incorpora la pestanya **[ 🌐 Cerca ]** connectada a `mcp-server-academic-spain` i a `add-paper`: permet cercar en 35 bases de dades i, amb el botó d'importació en un sol clic, cridar `add-paper --pdf-url` per afegir el document automàticament a la biblioteca.
-4. **Pont d'Intel·ligència Artificial (`mcp-server-academic-spain`):**
-   - El servidor MCP permet a qualsevol agent d'IA cercar en 35 bases de dades i desar directament articles a la biblioteca local `zoterless` i `Faristol`.
-5. **Zero dependència mútua (*No vendor lock-in*):**
-   - Si Faristol no està obert, `zoterless` funciona al 100% de la seua potència. Si `zoterless` actualitza un fitxer, Faristol i Kate el detecten a l'instant.
+1. **`zoterless`:** El dimoni d'ingesta ràpida (0 MB RAM en repòs).
+2. **`Faristol`:** El banc de treball de lectura de PDFs a 3 plafons amb visor PDF.js, editor Markdown, xat amb Antigravity IA i NotebookLM.
+3. **`mcp-server-academic-spain`:** El servidor MCP de cerca federada en 35 bases de dades per a agents d'intel·ligència artificial.
 
 ---
 
 ## ⚖️ Política d'Accés Obert i Resolució Externa de Documents
 
 `zoterless` està compromès de forma estricta amb la **ciència oberta (*Open Access*)** i el respecte als marcs legals i de drets d'autor:
-
-- El sistema només utilitza de forma nativa fonts públiques i legals d'accés obert: **Unpaywall API**, **OpenAlex**, **Dialnet**, **arXiv**, metadades de **Crossref** i repositoris institucionals (OJS, DSpace, RODERIC).
-- Per motius ètics, legals i de compliment de la propietat intel·lectual en diverses jurisdiccions, **aquest repositori no incorpora ni distribueix connectors ni resolutors cap a fonts no oficials com Sci-Hub**.
-- Tanmateix, gràcies a l'arquitectura oberta basada en fitxers plans estàndard (`biblioteca.bib` i carpeta `pdfs/`), qualsevol investigador pot complementar el flux creant de forma autònoma scripts externs senzills (per exemple amb `curl` o Python) per gestionar descàrregues des de les seues pròpies fonts o subscripcions institucionals i col·locar els PDFs a `pdfs/{citekey}.pdf`.
-
----
-
-## 🙏 Agraïments i Reconeixements
-
-Aquest projecte és un tribut sincer al programari lliure i s'alça directament sobre les espatlles dels gegants que han definit el flux de treball acadèmic modern:
-
-- A l'equip de **Zotero** i de la Corporation for Digital Scholarship pel seu insubstituïble **Zotero Connector**, que continua sent la millor eina del món per capturar literatura científica directament des del navegador.
-- A **Emiliano Heyns** (*retorquere*) pel monumental treball d'enginyeria amb **Better BibTeX (BBT)**, el referent absolut de com han de ser les claus de citació canòniques i predictibles.
-- Als desenvolupadors de **ZotMoov** i **ZotFile**, pioners en la idea d'extreure i reanomenar PDFs per alliberar-los de bases de dades tancades.
-- A l'autor de **Better Notes**, per mostrar el camí cap a la integració atòmica entre literatura acadèmica i notes en Markdown.
-- Als projectes de ciència oberta i eines lliures: **OpenAlex**, **Crossref**, **ERIC (IES)**, **Dialnet**, **Unpaywall** i **Argos Translate**.
+- El sistema utilitza exclusivament fonts legals d'accés obert: **Unpaywall API**, **OpenAlex**, **Dialnet**, **arXiv**, metadades de **Crossref** i repositoris institucionals universitaris (OJS, DSpace, RODERIC).
+- Aquest repositori no incorpora ni distribueix connectors ni resolutors cap a portals no autoritzats. Gràcies a l'ús de fitxers plans estàndard (`biblioteca.bib` i carpeta `pdfs/`), l'usuari manté el control total de la seua biblioteca.
 
 ---
 
 ## ⚠️ Avís de Responsabilitat i Projecte Personal
 
-Aquest és un **projecte personal**, dissenyat artesanalment per donar resposta a un flux de treball concret de recerca acadèmica i gestió bibliogràfica:
+Aquest és un **projecte personal**, concebut artesanalment per donar resposta a un flux de treball concret de recerca acadèmica:
 - **Sense garanties (*AS-IS*):** Distribuït sota llicència MIT de manera lliure i comunitària, «tal com és», sense cap garantia explícita ni implícita.
-- **Exempció de responsabilitat:** L'autor no es fa responsable de cap possible pèrdua d'informació, alteració de fitxers, fallades del sistema, incompatibilitats, danys directes o indirectes derivats de l'execució d'aquests scripts o dimonis. **L'usuari ha de mantindre sempre còpies de seguretat periòdiques dels seus fitxers de notes (`notes/`), PDFs (`pdfs/`) i de la base de dades bibliogràfica (`biblioteca.bib`).**
-- **Condicions d'accés:** L'ús de les eines de descàrrega i el compliment estricte de les condicions d'accés i termes de servei de cada portal editorial o repositori acadèmic és responsabilitat exclusiva de l'usuari.
+- **Exempció de responsabilitat:** L'autor no es fa responsable de cap possible pèrdua d'informació, alteració de fitxers o fallades del sistema. Recomanem mantindre còpies de seguretat periòdiques dels vostres fitxers (`notes/`, `pdfs/` i `biblioteca.bib`).
 
 ---
 
@@ -322,7 +308,7 @@ Aquest és un **projecte personal**, dissenyat artesanalment per donar resposta 
 - **Concepció, visió del flux i necessitats d'investigació:** Casimir Victoria (@CasimirVictoria).
 - **Arquitectura i implementació del codi:** Creat, programat i afinat íntegrament en programació en parella (*pair programming*) emprant l'agent d'intel·ligència artificial **Antigravity CLI** (`agy`) de Google DeepMind.
 
-> *"Aquest programari ha nascut de la necessitat pràctica d'un flux de treball acadèmic fluid, sobirà i basat estrictament en text pla. Jo he aportat les idees, l'experiència d'usuari i la direcció del disseny; la programació i la implementació tècnica del codi han estat dutes a terme amb Antigravity CLI."* — Casimir Victoria
+> *"Aquest programari ha nascut de la necessitat pràctica d'un flux de treball acadèmic fluid, sobirà i basat estrictament en text pla. Casimir n'ha aportat les idees, l'experiència d'usuari i la direcció del disseny; la programació i la implementació tècnica del codi han estat dutes a terme amb Antigravity CLI."*
 
 ---
 
