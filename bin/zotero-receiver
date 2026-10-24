@@ -62,24 +62,85 @@ STOPWORDS = {
     "les", "y", "en", "sobre", "un", "una", "los", "las", "del", "dels", "e", "o", "u"
 }
 
-def trigger_faristol_sync():
+def trigger_faristol_sync(citekey=None):
     """Avisa Faristol que s'ha afegit un document perquè s'actualitze la interfície a l'instant."""
     try:
-        req = Request("http://127.0.0.1:8080/api/library/notify-change", data=b"{}", headers={"Content-Type": "application/json"}, method="POST")
+        body = {"doc": f"@{citekey}.md"} if citekey else {}
+        data = json.dumps(body).encode("utf-8")
+        req = Request("http://127.0.0.1:8080/api/library/notify-change", data=data, headers={"Content-Type": "application/json"}, method="POST")
         with urlopen(req, timeout=0.8):
             pass
     except Exception:
         pass
 
-def trigger_kate_sync():
+def trigger_kate_sync(citekey=None):
     """Sincronitza en segon pla el projecte de Kate i Faristol per reflectir immediatament el nou article."""
-    trigger_faristol_sync()
+    trigger_faristol_sync(citekey)
     try:
         sync_cmd = shutil.which("kate-sync-project") or str(Path.home() / ".local/bin/kate-sync-project")
         if Path(sync_cmd).is_file():
             subprocess.Popen([sync_cmd, "--quiet"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
+
+def focus_faristol_or_open(citekey):
+    """Canvia a la pestanya fixada de Faristol a Firefox i obri el document, o fa fallback a xdg-open."""
+    if not citekey:
+        return
+
+    # 1. Avisem Faristol per HTTP/SSE perquè la seua pestanya fixada òbriga el document
+    try:
+        payload = json.dumps({"doc": f"@{citekey}.md"}).encode("utf-8")
+        req = Request("http://127.0.0.1:8080/api/library/open-document", data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        with urlopen(req, timeout=1.0):
+            pass
+    except Exception:
+        pass
+
+    # 2. Intentem activar la finestra de Firefox mitjançant KWin Scripting (Wayland / Plasma 6)
+    firefox_activated = False
+    try:
+        import dbus, tempfile
+        bus = dbus.SessionBus()
+        scripting = bus.get_object("org.kde.KWin", "/Scripting")
+        script_code = """
+        var windows = workspace.windowList();
+        for (var i = 0; i < windows.length; i++) {
+            var w = windows[i];
+            if (w.desktopFileName && w.desktopFileName.indexOf('firefox') !== -1) {
+                workspace.activeWindow = w;
+                break;
+            }
+        }
+        """
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(script_code)
+            temp_path = f.name
+        try:
+            script_id = scripting.loadScript(temp_path, dbus_interface="org.kde.kwin.Scripting")
+            obj = bus.get_object("org.kde.KWin", f"/Scripting/Script{script_id}")
+            obj.run(dbus_interface="org.kde.kwin.Script")
+            obj.stop(dbus_interface="org.kde.kwin.Script")
+            firefox_activated = True
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+    except Exception:
+        pass
+
+    # 3. Si Firefox s'ha activat, premem Ctrl+1 (tecles 29:1 2:1 2:0 29:0) per anar a la pestanya fixada de Faristol
+    if firefox_activated:
+        try:
+            env = os.environ.copy()
+            env["YDOTOOL_SOCKET"] = "/run/user/1000/.ydotool_socket"
+            subprocess.run(["ydotool", "key", "29:1", "2:1", "2:0", "29:0"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+            return
+        except Exception:
+            pass
+
+    # 4. Fallback: si no s'ha pogut activar la pestanya o no s'ha trobat Firefox, obrim per xdg-open
+    url = f"http://127.0.0.1:8080/?doc=%40{quote(citekey)}.md"
+    subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def is_valid_pdf_content(pdf_path, title="", abstract="", doi=""):
     """Comprova si el fitxer PDF té contingut acadèmic real i no és un avís antibot / paywall."""
@@ -146,8 +207,7 @@ def notify(title, message, urgency="normal", citekey=None):
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
             action = res.stdout.strip().lower()
             if action in ("open", "default", "0", "1"):
-                url = f"http://127.0.0.1:8080/?doc=%40{quote(citekey)}.md"
-                subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                focus_faristol_or_open(citekey)
         except Exception:
             pass
 
@@ -1073,8 +1133,8 @@ tags: []
         short_title = short_title[:57] + "..."
     notify(f"📚 Zotero: @{citekey}", f"{short_title}\n{pdf_status} | 📝 Nota creada", citekey=citekey)
 
-    # 9. Sincronitzar automàticament .kateproject en segon pla
-    trigger_kate_sync()
+    # 9. Sincronitzar automàticament .kateproject i Faristol en segon pla
+    trigger_kate_sync(citekey)
     return citekey
 
 def extract_singlefile_metadata(html_text, fallback_url="", fallback_title=""):
