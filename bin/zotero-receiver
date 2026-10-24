@@ -654,35 +654,53 @@ def key_exists_in_bib(key, bib_file):
     return bool(re.search(rf'@[a-zA-Z]+\s*\{{\s*{re.escape(key)}\s*,', content))
 
 def append_or_update_bib(citekey, item_type, fields, bib_file):
-    """Afegeix una entrada o actualitza el camp 'file' si abans faltava."""
+    """Afegeix una entrada o actualitza el camp 'file' si abans faltava, amb bloqueig cooperatiu i escriptura atòmica."""
+    import fcntl
     bib_file.parent.mkdir(parents=True, exist_ok=True)
-    if not key_exists_in_bib(citekey, bib_file):
-        lines = [f"@{item_type}{{{citekey},"]
-        for k, v in fields.items():
-            if v:
-                lines.append(f"  {k} = {{{v}}},")
-        lines.append("}")
-        entry = "\n".join(lines)
-        with open(bib_file, "a", encoding="utf-8") as f:
-            f.write(f"\n{entry}\n")
-    else:
-        # Si ja existeix, comprovar si cal afegir o actualitzar el camp 'file'
-        content = bib_file.read_text(encoding="utf-8", errors="ignore")
-        pdf_file = fields.get("file")
-        if pdf_file and f"file = {{{pdf_file}}}" not in content:
-            # Substituir o afegir file
-            m = re.search(rf'(@[a-zA-Z]+\s*\{{\s*{re.escape(citekey)}\s*,[\s\S]*?)(}})', content)
-            if m:
-                block = m.group(1)
-                if "file =" in block:
-                    new_block = re.sub(r'file\s*=\s*\{[^}]*\}', f'file = {{{pdf_file}}}', block)
-                else:
-                    new_block = block.rstrip()
-                    if not new_block.endswith(','):
-                        new_block += ','
-                    new_block += f"\n  file = {{{pdf_file}}}\n"
-                new_content = content[:m.start()] + new_block + "}" + content[m.end():]
-                bib_file.write_text(new_content, encoding="utf-8")
+    lock_path = bib_file.parent / f".{bib_file.name}.lock"
+    with open(lock_path, "w", encoding="utf-8") as lock_f:
+        fcntl.flock(lock_f, fcntl.LOCK_EX)
+        try:
+            if not key_exists_in_bib(citekey, bib_file):
+                lines = [f"@{item_type}{{{citekey},"]
+                for k, v in fields.items():
+                    if v:
+                        lines.append(f"  {k} = {{{v}}},")
+                lines.append("}")
+                entry = "\n".join(lines)
+                existing = bib_file.read_text(encoding="utf-8", errors="ignore") if bib_file.is_file() else ""
+                new_content = f"{existing}\n{entry}\n" if existing else f"{entry}\n"
+                with tempfile.NamedTemporaryFile("w", dir=bib_file.parent, delete=False, encoding="utf-8") as tf:
+                    tf.write(new_content)
+                    tf.flush()
+                    os.fsync(tf.fileno())
+                    tmp_name = tf.name
+                os.replace(tmp_name, bib_file)
+            else:
+                # Si ja existeix, comprovar si cal afegir o actualitzar el camp 'file'
+                content = bib_file.read_text(encoding="utf-8", errors="ignore")
+                pdf_file = fields.get("file")
+                if pdf_file and f"file = {{{pdf_file}}}" not in content:
+                    # Substituir o afegir file
+                    m = re.search(rf'(@[a-zA-Z]+\s*\{{\s*{re.escape(citekey)}\s*,[\s\S]*?)(}})', content)
+                    if m:
+                        block = m.group(1)
+                        if "file =" in block:
+                            new_block = re.sub(r'file\s*=\s*\{[^}]*\}', f'file = {{{pdf_file}}}', block)
+                        else:
+                            new_block = block.rstrip()
+                            if not new_block.endswith(','):
+                                new_block += ','
+                            new_block += f"\n  file = {{{pdf_file}}}\n"
+                        new_content = content[:m.start()] + new_block + "}" + content[m.end():]
+                        with tempfile.NamedTemporaryFile("w", dir=bib_file.parent, delete=False, encoding="utf-8") as tf:
+                            tf.write(new_content)
+                            tf.flush()
+                            os.fsync(tf.fileno())
+                            tmp_name = tf.name
+                        os.replace(tmp_name, bib_file)
+        finally:
+            fcntl.flock(lock_f, fcntl.LOCK_UN)
 
 _recent_saves_lock = threading.Lock()
 _recent_saves = {}

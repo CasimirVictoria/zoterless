@@ -1251,7 +1251,8 @@ def key_exists_in_bib(key, bib_file):
     return bool(re.search(rf'@[a-zA-Z]+\s*\{{\s*{re.escape(key)}\s*,', content))
 
 def format_and_append_bibtex(raw_bib, citekey, pdf_path, bib_file):
-    """Afegeix la citekey i el camp file = {...} a l'entrada BibTeX i la desa."""
+    """Afegeix la citekey i el camp file = {...} a l'entrada BibTeX i la desa de forma atòmica amb bloqueig."""
+    import fcntl, tempfile
     formatted = re.sub(r'^@([a-zA-Z]+)\s*\{[^,]+,', rf'@\1{{{citekey},', raw_bib.strip(), count=1)
     pdf_field = f"  file = {{{pdf_path}}},\n"
     
@@ -1263,8 +1264,21 @@ def format_and_append_bibtex(raw_bib, citekey, pdf_path, bib_file):
         formatted = f"{entry_body}\n{pdf_field}}}"
         
     bib_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(bib_file, "a", encoding="utf-8") as f:
-        f.write(f"\n{formatted}\n")
+    lock_path = bib_file.parent / f".{bib_file.name}.lock"
+    with open(lock_path, "w", encoding="utf-8") as lock_f:
+        fcntl.flock(lock_f, fcntl.LOCK_EX)
+        try:
+            if not key_exists_in_bib(citekey, bib_file):
+                existing = bib_file.read_text(encoding="utf-8", errors="ignore") if bib_file.is_file() else ""
+                new_content = f"{existing}\n{formatted}\n" if existing else f"{formatted}\n"
+                with tempfile.NamedTemporaryFile("w", dir=bib_file.parent, delete=False, encoding="utf-8") as tf:
+                    tf.write(new_content)
+                    tf.flush()
+                    os.fsync(tf.fileno())
+                    tmp_name = tf.name
+                os.replace(tmp_name, bib_file)
+        finally:
+            fcntl.flock(lock_f, fcntl.LOCK_UN)
 
 def create_initial_note(citekey, title, author, year, notes_dir, abstract="", doi=""):
     """Crea una nota inicial en Markdown per a l'article si no existeix."""

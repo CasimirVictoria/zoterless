@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 kate-sync-project: Generador i sincronitzador de la Biblioteca Virtual per a Kate (.kateproject)
-Llegeix les col·leccions virtuals de plec_collections.json (i el frontmatter YAML de les notes)
+Llegeix les col·leccions virtuals de collections.json (i el frontmatter YAML de les notes)
 i genera l'arbre de projecte natiu de Kate per tindre la Biblioteca Virtual a la barra lateral.
 """
 
@@ -17,14 +17,10 @@ def get_base_dirs():
     bib_dir = Path(os.environ.get("BIB_DIR", docs_dir / "Biblioteca")).resolve()
     pdfs_dir = Path(os.environ.get("PDFS_DIR", bib_dir / "pdfs")).resolve()
     
-    # Fitxer de col·leccions de Faristol / Plec
+    # Fitxer de col·leccions de Faristol
     coll_file = Path.home() / ".config/faristol/collections.json"
     if not coll_file.exists():
         coll_file = bib_dir / "faristol_collections.json"
-    if not coll_file.exists():
-        coll_file = Path.home() / ".config/plec/collections.json"
-    if not coll_file.exists():
-        coll_file = bib_dir / "plec_collections.json"
     
     return docs_dir, notes_dir, bib_dir, pdfs_dir, coll_file
 
@@ -64,7 +60,7 @@ def sync_kateproject(verbose=True):
             print(f"Error: El directori {docs_dir} no existeix.")
         return False
 
-    # 1. Carregar col·leccions des de plec_collections.json
+    # 1. Carregar col·leccions des de collections.json
     collections_data = []
     if coll_file.exists():
         try:
@@ -74,7 +70,7 @@ def sync_kateproject(verbose=True):
                     collections_data = raw["collections"]
         except Exception as e:
             if verbose:
-                print(f"Avís llegint plec_collections.json: {e}")
+                print(f"Avís llegint collections.json: {e}")
 
     # Mapa de col·leccions per nom o id
     col_map = {}
