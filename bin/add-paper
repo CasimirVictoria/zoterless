@@ -58,15 +58,33 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
 }
 
-def notify(title, message, urgency="normal"):
-    """Envia una notificació d'escriptori mitjançant notify-send."""
-    try:
-        subprocess.run(
-            ["notify-send", "-a", "Biblioteca", "-u", urgency, "-i", "accessories-dictionary", title, message],
-            check=False
-        )
-    except Exception:
-        pass
+def notify(title, message, urgency="normal", citekey=None):
+    """Envia una notificació d'escriptori mitjançant notify-send amb acció per obrir a Faristol."""
+    import threading
+    def _send():
+        cmd = [
+            "notify-send",
+            "-a", "Biblioteca",
+            "-u", urgency,
+            "-i", "accessories-dictionary"
+        ]
+        if citekey:
+            cmd.extend([
+                "--action=open=📖 Obrir a Faristol",
+                "--action=default=Obrir"
+            ])
+        cmd.extend([title, message])
+
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+            action = res.stdout.strip().lower()
+            if action in ("open", "default", "0", "1"):
+                url = f"http://127.0.0.1:8080/?doc=%40{quote(citekey)}.md"
+                subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    threading.Thread(target=_send, daemon=True).start()
 
 def is_eduvpn_active():
     """Comprova si la connexió WireGuard / VPN de la universitat (EduVPN) està activa."""
@@ -1347,7 +1365,8 @@ def process_paper_by_doi(doi, direct_pdf=None, abstract=None):
         
     notify(
         f"📚 Article afegit: @{citekey}",
-        f"{short_title}\n{pdf_status} | 📝 Nota creada"
+        f"{short_title}\n{pdf_status} | 📝 Nota creada",
+        citekey=citekey
     )
     print(f"✅ Article afegit amb èxit: @{citekey}")
     print(f"   Títol: {short_title}")
@@ -1418,7 +1437,7 @@ def process_web_article(url):
     note_path = NOTES_DIR / f"@{citekey}.md"
 
     if key_exists_in_bib(citekey, BIB_FILE) and (target_pdf.is_file() or target_html.is_file()) and note_path.is_file():
-        notify("Biblioteca", f"ℹ️ L'article web ja existeix a la biblioteca:\n@{citekey}")
+        notify("Biblioteca", f"ℹ️ L'article web ja existeix a la biblioteca:\n@{citekey}", citekey=citekey)
         print(f"ℹ️ L'article web ja existeix a la biblioteca: @{citekey}")
         return True
 
@@ -1541,7 +1560,7 @@ tags: []
     else:
         pdf_status = "⚠️ Sense PDF ni HTML"
     short_title = clean_latex(title)[:57] + "..." if len(clean_latex(title)) > 60 else clean_latex(title)
-    notify(f"📚 Article web afegit: @{citekey}", f"{short_title}\n{pdf_status} | 📝 Nota creada")
+    notify(f"📚 Article web afegit: @{citekey}", f"{short_title}\n{pdf_status} | 📝 Nota creada", citekey=citekey)
     print(f"✅ Article web afegit amb èxit: @{citekey}")
     print(f"   Títol: {short_title}")
     print(f"   Estat: {pdf_status}")
@@ -1604,7 +1623,7 @@ def process_paper_input(raw_input, direct_pdf=None, force_web=False):
         note_path = NOTES_DIR / f"@{citekey}.md"
         
         if already_in_bib and target_pdf.is_file() and note_path.is_file():
-            notify("Biblioteca", f"ℹ️ L'article ja existeix a la biblioteca:\n@{citekey}")
+            notify("Biblioteca", f"ℹ️ L'article ja existeix a la biblioteca:\n@{citekey}", citekey=citekey)
             print(f"ℹ️ L'article ja existeix a la biblioteca: @{citekey}")
             return
             
@@ -1624,7 +1643,7 @@ def process_paper_input(raw_input, direct_pdf=None, force_web=False):
                 
         create_initial_note(citekey, title, authors, year, NOTES_DIR, abstract=meta.get("abstract", ""))
         pdf_status = "📄 PDF desat" if pdf_saved else "⚠️ Sense PDF automàtic"
-        notify(f"📚 Article afegit: @{citekey}", f"{clean_latex(title)[:55]}...\n{pdf_status} | 📝 Nota creada")
+        notify(f"📚 Article afegit: @{citekey}", f"{clean_latex(title)[:55]}...\n{pdf_status} | 📝 Nota creada", citekey=citekey)
         print(f"✅ Article afegit: @{citekey} ({pdf_status})")
         return
 
@@ -1651,7 +1670,7 @@ def process_paper_input(raw_input, direct_pdf=None, force_web=False):
                 f.write(f"\n{bib_entry}\n")
             create_initial_note(citekey, meta["title"], meta.get("authors", []), meta.get("year", ""), NOTES_DIR, abstract=meta.get("abstract", ""))
             pdf_status = "📄 PDF desat" if pdf_saved else "⚠️ Sense PDF automàtic"
-            notify(f"📚 Article Dialnet afegit: @{citekey}", f"{clean_latex(meta['title'])[:55]}...\n{pdf_status} | 📝 Nota creada")
+            notify(f"📚 Article Dialnet afegit: @{citekey}", f"{clean_latex(meta['title'])[:55]}...\n{pdf_status} | 📝 Nota creada", citekey=citekey)
             print(f"✅ Article Dialnet afegit: @{citekey} ({pdf_status})")
             return
 
@@ -1706,7 +1725,7 @@ def process_paper_input(raw_input, direct_pdf=None, force_web=False):
             if already_in_bib and target_pdf.is_file() and note_path.is_file():
                 is_bio = "biomcp" in paper.source.lower() or (paper.extra and paper.extra.get("pmid"))
                 doc_type = "Norma BOE" if paper.source == "BOE" else "Norma DOGV" if paper.source == "DOGV" else "Article Mèdic" if is_bio else "Document"
-                notify("Biblioteca", f"ℹ️ {doc_type} ja existeix a la biblioteca:\n@{citekey}")
+                notify("Biblioteca", f"ℹ️ {doc_type} ja existeix a la biblioteca:\n@{citekey}", citekey=citekey)
                 print(f"ℹ️ {doc_type} ja existeix a la biblioteca: @{citekey}")
                 return
 
@@ -1768,7 +1787,7 @@ def process_paper_input(raw_input, direct_pdf=None, force_web=False):
             icon = "⚖️" if paper.source == "BOE" else "🏛️" if paper.source == "DOGV" else "🩺" if is_bio else "📚"
             doc_type = "Norma BOE" if paper.source == "BOE" else "Norma DOGV" if paper.source == "DOGV" else "Article Mèdic" if is_bio else "Document"
             pdf_status = "📄 PDF desat" if pdf_saved else "⚠️ Sense PDF automàtic"
-            notify(f"{icon} {doc_type} afegida: @{citekey}", f"{clean_latex(paper.title)[:55]}...\n{pdf_status} | 📝 Nota creada")
+            notify(f"{icon} {doc_type} afegida: @{citekey}", f"{clean_latex(paper.title)[:55]}...\n{pdf_status} | 📝 Nota creada", citekey=citekey)
             print(f"✅ {doc_type} afegit: @{citekey} ({pdf_status})")
             return
 
