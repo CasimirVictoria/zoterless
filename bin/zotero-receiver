@@ -1033,15 +1033,18 @@ def process_zotero_item(item):
                         except Exception as e_h2:
                             print(f"Error desant HTML descarregat: {e_h2}", file=sys.stderr)
 
-                    doc_title = clean_latex(title).replace('\n', ' ').strip()
-                    doc_author = clean_latex(author_str).replace('\n', ' ').strip()
-                    if meta and meta.sitename and meta.sitename not in doc_author:
-                        doc_author = f"{doc_author} ({clean_latex(meta.sitename)})"
-                    doc_date = str(year) if year else ""
-                    if meta and meta.date:
-                        doc_date = str(meta.date)
+                    # 5h-1. Si prové de SingleFile, conservem exclusivament l'snapshot HTML pur (sense compilar PDF amb XeLaTeX)
+                    is_sf = item.get("is_singlefile", False)
+                    if not is_sf:
+                        doc_title = clean_latex(title).replace('\n', ' ').strip()
+                        doc_author = clean_latex(author_str).replace('\n', ' ').strip()
+                        if meta and meta.sitename and meta.sitename not in doc_author:
+                            doc_author = f"{doc_author} ({clean_latex(meta.sitename)})"
+                        doc_date = str(year) if year else ""
+                        if meta and meta.date:
+                            doc_date = str(meta.date)
 
-                    pdf_md = f"""---
+                        pdf_md = f"""---
 title: {json.dumps(doc_title)}
 author: {json.dumps(doc_author)}
 date: {json.dumps(doc_date)}
@@ -1056,20 +1059,20 @@ mainfont: "DejaVu Serif"
 
 {web_article_text}
 """
-                    tmp_md = Path(f"/tmp/web_capture_{citekey}.md")
-                    tmp_md.write_text(pdf_md, encoding="utf-8")
-                    PDF_DIR.mkdir(parents=True, exist_ok=True)
-                    res = subprocess.run([
-                        "pandoc", str(tmp_md),
-                        "-o", str(target_pdf),
-                        "--pdf-engine=xelatex"
-                    ], capture_output=True, text=True, timeout=45)
-                    if res.returncode == 0 and target_pdf.is_file() and target_pdf.stat().st_size > 500:
-                        pdf_saved = True
-                    try:
-                        tmp_md.unlink(missing_ok=True)
-                    except Exception:
-                        pass
+                        tmp_md = Path(f"/tmp/web_capture_{citekey}.md")
+                        tmp_md.write_text(pdf_md, encoding="utf-8")
+                        PDF_DIR.mkdir(parents=True, exist_ok=True)
+                        res = subprocess.run([
+                            "pandoc", str(tmp_md),
+                            "-o", str(target_pdf),
+                            "--pdf-engine=xelatex"
+                        ], capture_output=True, text=True, timeout=45)
+                        if res.returncode == 0 and target_pdf.is_file() and target_pdf.stat().st_size > 500:
+                            pdf_saved = True
+                        try:
+                            tmp_md.unlink(missing_ok=True)
+                        except Exception:
+                            pass
         except Exception as e:
             print(f"Error generant PDF d'article web amb Trafilatura/Pandoc: {e}", file=sys.stderr)
 
@@ -1609,7 +1612,8 @@ class ZoteroHandler(http.server.BaseHTTPRequestHandler):
                         "title": sf_title or "Snapshot Web",
                         "url": sf_url,
                         "html": html_snap,
-                        "date": sf_date
+                        "date": sf_date,
+                        "is_singlefile": True
                     }
                     threading.Thread(target=process_zotero_item, args=(item,), daemon=True).start()
                     if "/singlefile" in self.path and "text/html" not in self.headers.get("Accept", ""):
