@@ -25,6 +25,7 @@ import time
 import unicodedata
 import glob
 import shutil
+import tempfile
 from pathlib import Path
 from urllib.parse import quote, unquote, urljoin, urlparse, parse_qs
 from urllib.request import Request, urlopen
