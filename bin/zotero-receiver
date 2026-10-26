@@ -1621,7 +1621,7 @@ class ZoteroHandler(http.server.BaseHTTPRequestHandler):
                     NOTES_DIR.mkdir(parents=True, exist_ok=True)
                     dest_note.write_text(raw_text, encoding="utf-8")
                     print(f"📱 Android: rebuda nota Markdown compartida -> {dest_note.name}", file=sys.stderr)
-                    send_kde_notification("📱 Nota Markdown rebuda des d'Android", dest_note.name)
+                    notify("📱 Nota Markdown rebuda des d'Android", dest_note.name)
                     trigger_kate_sync(dest_note.stem)
 
                     self.send_cors_headers(200, "text/html; charset=utf-8")
@@ -1686,7 +1686,7 @@ class ZoteroHandler(http.server.BaseHTTPRequestHandler):
                         NOTES_DIR.mkdir(parents=True, exist_ok=True)
                         dest_note.write_text(shared_target.strip(), encoding="utf-8")
                         print(f"📱 Android: rebut text lliure -> desat a {dest_note.name}", file=sys.stderr)
-                        send_kde_notification("📱 Nota ràpida rebuda des d'Android", dest_note.name)
+                        notify("📱 Nota ràpida rebuda des d'Android", dest_note.name)
                         trigger_kate_sync(dest_note.stem)
 
                         self.send_cors_headers(200, "text/html; charset=utf-8")
