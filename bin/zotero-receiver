@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 import unicodedata
 import glob
 import shutil
@@ -1232,7 +1233,12 @@ MOBILE_PWA_MANIFEST = json.dumps({
             "files": [
                 {
                     "name": "file",
-                    "accept": ["application/pdf", ".pdf", "text/html", ".html", ".htm"]
+                    "accept": [
+                        "application/pdf", ".pdf",
+                        "text/html", ".html", ".htm",
+                        "text/markdown", "text/x-markdown", ".md", ".markdown",
+                        "text/plain", ".txt"
+                    ]
                 }
             ]
         }
@@ -1280,8 +1286,8 @@ def render_mobile_portal_html(msg="", citekey=""):
             <label>🔗 URL d'article, DOI o pàgina web:</label>
             <input type="text" name="url" placeholder="https://... o 10.1038/...">
 
-            <label>📄 O puja un fitxer PDF / Snapshot HTML des del mòbil:</label>
-            <input type="file" name="file" accept=".pdf,.html,.htm,application/pdf,text/html">
+            <label>📄 O puja un fitxer PDF / Web HTML / Nota Markdown des del mòbil:</label>
+            <input type="file" name="file" accept=".pdf,.html,.htm,.md,.markdown,.txt,application/pdf,text/html,text/markdown,text/plain">
 
             <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer;">
                 <input type="checkbox" name="force_web" value="1">
@@ -1625,16 +1631,78 @@ class ZoteroHandler(http.server.BaseHTTPRequestHandler):
                         self.wfile.write(render_mobile_portal_html(f"🌐 Snapshot SingleFile rebut: <b>{sf_title or sf_url}</b>. Desant HTML + PDF + Nota...").encode("utf-8"))
                     return
 
-                # Cas 3: URL o DOI compartit des del menú Compartir d'Android o formulari
+                # Cas 3: Fitxer Markdown o Text compartit des d'Android (.md, .markdown, .txt)
+                is_md_file = False
+                if file_obj:
+                    fname = file_obj.get("filename", "").lower()
+                    if fname.endswith((".md", ".markdown", ".txt")) or "markdown" in ctype or "text/plain" in ctype:
+                        is_md_file = True
+
+                if is_md_file:
+                    raw_text = file_obj["bytes"].decode("utf-8", errors="replace")
+                    orig_fname = file_obj.get("filename") or f"nota_{int(time.time())}.md"
+                    clean_name = Path(orig_fname).name
+                    if not clean_name.endswith(".md"):
+                        clean_name = f"{Path(clean_name).stem}.md"
+
+                    dest_note = NOTES_DIR / clean_name
+                    # Evitar sobreescriure si ja existeix
+                    counter = 1
+                    stem_base = Path(clean_name).stem
+                    while dest_note.exists():
+                        dest_note = NOTES_DIR / f"{stem_base}_{counter}.md"
+                        counter += 1
+
+                    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+                    dest_note.write_text(raw_text, encoding="utf-8")
+                    print(f"📱 Android: rebuda nota Markdown compartida -> {dest_note.name}", file=sys.stderr)
+                    send_kde_notification("📱 Nota Markdown rebuda des d'Android", dest_note.name)
+                    trigger_kate_sync(dest_note.stem)
+
+                    self.send_cors_headers(200, "text/html; charset=utf-8")
+                    note_open_url = f"http://100.80.29.31:8080/?doc={quote(dest_note.name)}"
+                    btn_html = f'<div style="margin-top:14px;"><a href="{note_open_url}" style="display:inline-block;padding:10px 16px;background:#10b981;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;">📖 Obrir {dest_note.name} a Faristol</a></div>'
+                    msg = f"📝 Nota Markdown desada al Segon Cervell (<code>{dest_note.name}</code>).{btn_html}"
+                    self.wfile.write(render_mobile_portal_html(msg).encode("utf-8"))
+                    return
+
+                # Cas 4: URL o DOI compartit des del menú Compartir d'Android o formulari
                 shared_target = url_val or text_val
                 if shared_target:
                     m_http = re.search(r'(https?://\S+)', shared_target)
-                    target_arg = m_http.group(1) if m_http else shared_target.strip()
-                    print(f"📱 Android: rebut enllaç/DOI compartit ({target_arg})", file=sys.stderr)
-                    run_add_paper_async(target_arg, force_web=force_web)
-                    self.send_cors_headers(200, "text/html; charset=utf-8")
-                    self.wfile.write(render_mobile_portal_html(f"🔗 Enllaç rebut: <code>{target_arg}</code>. Processant amb Zoterless...").encode("utf-8"))
-                    return
+                    if m_http:
+                        target_arg = m_http.group(1)
+                        print(f"📱 Android: rebut enllaç compartit ({target_arg})", file=sys.stderr)
+                        run_add_paper_async(target_arg, force_web=force_web)
+                        self.send_cors_headers(200, "text/html; charset=utf-8")
+                        self.wfile.write(render_mobile_portal_html(f"🔗 Enllaç rebut: <code>{target_arg}</code>. Processant amb Zoterless...").encode("utf-8"))
+                        return
+                    elif len(shared_target.strip()) > 0 and not shared_target.strip().startswith("10."):
+                        # És un text lliure compartit des del mòbil (ex: nota ràpida) -> Crear nota Markdown
+                        timestamp_str = datetime.now().strftime("%Y%m%d%H%M%S") if 'datetime' in globals() else str(int(time.time()))
+                        first_line = shared_target.strip().splitlines()[0][:40]
+                        clean_title = re.sub(r'[^\w\s-]', '', first_line).strip().replace(' ', '-') or "nota-rapida"
+                        note_filename = f"{timestamp_str}--{clean_title}.md"
+                        dest_note = NOTES_DIR / note_filename
+                        NOTES_DIR.mkdir(parents=True, exist_ok=True)
+                        dest_note.write_text(shared_target.strip(), encoding="utf-8")
+                        print(f"📱 Android: rebut text lliure -> desat a {dest_note.name}", file=sys.stderr)
+                        send_kde_notification("📱 Nota ràpida rebuda des d'Android", dest_note.name)
+                        trigger_kate_sync(dest_note.stem)
+
+                        self.send_cors_headers(200, "text/html; charset=utf-8")
+                        note_open_url = f"http://100.80.29.31:8080/?doc={quote(dest_note.name)}"
+                        btn_html = f'<div style="margin-top:14px;"><a href="{note_open_url}" style="display:inline-block;padding:10px 16px;background:#10b981;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;">📖 Obrir a Faristol</a></div>'
+                        msg = f"📝 Text desat com a nova nota al Segon Cervell (<code>{dest_note.name}</code>).{btn_html}"
+                        self.wfile.write(render_mobile_portal_html(msg).encode("utf-8"))
+                        return
+                    else:
+                        target_arg = shared_target.strip()
+                        print(f"📱 Android: rebut DOI compartit ({target_arg})", file=sys.stderr)
+                        run_add_paper_async(target_arg, force_web=force_web)
+                        self.send_cors_headers(200, "text/html; charset=utf-8")
+                        self.wfile.write(render_mobile_portal_html(f"🔗 DOI rebut: <code>{target_arg}</code>. Processant amb Zoterless...").encode("utf-8"))
+                        return
 
             except Exception as e:
                 print(f"Error processant /singlefile o /ingest: {e}", file=sys.stderr)
