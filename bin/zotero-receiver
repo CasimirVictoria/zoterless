@@ -1597,9 +1597,43 @@ class ZoteroHandler(http.server.BaseHTTPRequestHandler):
                         self.wfile.write(render_mobile_portal_html(f"📄 PDF rebut des del mòbil (<code>{orig_fname}</code>). Extreient DOI/metadades i creant nota...").encode("utf-8"))
                     return
 
-                # Cas 2: Fitxer HTML pujat (extensió SingleFile a Firefox Android o fitxer .html)
+                # Cas 2: Fitxer Markdown o Text compartit des d'Android (.md, .markdown, .txt)
+                is_md_file = False
+                if file_obj:
+                    fname = file_obj.get("filename", "").lower()
+                    if fname.endswith((".md", ".markdown", ".txt")) or "markdown" in ctype or "text/markdown" in file_obj.get("content_type", ""):
+                        is_md_file = True
+
+                if is_md_file:
+                    raw_text = file_obj["bytes"].decode("utf-8", errors="replace")
+                    orig_fname = file_obj.get("filename") or f"nota_{int(time.time())}.md"
+                    clean_name = Path(orig_fname).name
+                    if not clean_name.endswith(".md"):
+                        clean_name = f"{Path(clean_name).stem}.md"
+
+                    dest_note = NOTES_DIR / clean_name
+                    counter = 1
+                    stem_base = Path(clean_name).stem
+                    while dest_note.exists():
+                        dest_note = NOTES_DIR / f"{stem_base}_{counter}.md"
+                        counter += 1
+
+                    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+                    dest_note.write_text(raw_text, encoding="utf-8")
+                    print(f"📱 Android: rebuda nota Markdown compartida -> {dest_note.name}", file=sys.stderr)
+                    send_kde_notification("📱 Nota Markdown rebuda des d'Android", dest_note.name)
+                    trigger_kate_sync(dest_note.stem)
+
+                    self.send_cors_headers(200, "text/html; charset=utf-8")
+                    note_open_url = f"http://100.80.29.31:8080/?doc={quote(dest_note.name)}"
+                    btn_html = f'<div style="margin-top:14px;"><a href="{note_open_url}" style="display:inline-block;padding:10px 16px;background:#10b981;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;">📖 Obrir {dest_note.name} a Faristol</a></div>'
+                    msg = f"📝 Nota Markdown desada al Segon Cervell (<code>{dest_note.name}</code>).{btn_html}"
+                    self.wfile.write(render_mobile_portal_html(msg).encode("utf-8"))
+                    return
+
+                # Cas 3: Fitxer HTML pujat (extensió SingleFile a Firefox Android o fitxer .html)
                 html_snap = ""
-                if file_obj and file_obj["bytes"]:
+                if file_obj and file_obj["bytes"] and (file_obj.get("filename", "").lower().endswith((".html", ".htm")) or "html" in file_obj.get("content_type", "")):
                     html_snap = file_obj["bytes"].decode("utf-8", errors="ignore")
                 elif "text/html" in ctype or body.lstrip().lower().startswith(("<!doctype", "<html", "<!--")):
                     html_snap = body
@@ -1629,41 +1663,6 @@ class ZoteroHandler(http.server.BaseHTTPRequestHandler):
                     else:
                         self.send_cors_headers(200, "text/html; charset=utf-8")
                         self.wfile.write(render_mobile_portal_html(f"🌐 Snapshot SingleFile rebut: <b>{sf_title or sf_url}</b>. Desant HTML + PDF + Nota...").encode("utf-8"))
-                    return
-
-                # Cas 3: Fitxer Markdown o Text compartit des d'Android (.md, .markdown, .txt)
-                is_md_file = False
-                if file_obj:
-                    fname = file_obj.get("filename", "").lower()
-                    if fname.endswith((".md", ".markdown", ".txt")) or "markdown" in ctype or "text/plain" in ctype:
-                        is_md_file = True
-
-                if is_md_file:
-                    raw_text = file_obj["bytes"].decode("utf-8", errors="replace")
-                    orig_fname = file_obj.get("filename") or f"nota_{int(time.time())}.md"
-                    clean_name = Path(orig_fname).name
-                    if not clean_name.endswith(".md"):
-                        clean_name = f"{Path(clean_name).stem}.md"
-
-                    dest_note = NOTES_DIR / clean_name
-                    # Evitar sobreescriure si ja existeix
-                    counter = 1
-                    stem_base = Path(clean_name).stem
-                    while dest_note.exists():
-                        dest_note = NOTES_DIR / f"{stem_base}_{counter}.md"
-                        counter += 1
-
-                    NOTES_DIR.mkdir(parents=True, exist_ok=True)
-                    dest_note.write_text(raw_text, encoding="utf-8")
-                    print(f"📱 Android: rebuda nota Markdown compartida -> {dest_note.name}", file=sys.stderr)
-                    send_kde_notification("📱 Nota Markdown rebuda des d'Android", dest_note.name)
-                    trigger_kate_sync(dest_note.stem)
-
-                    self.send_cors_headers(200, "text/html; charset=utf-8")
-                    note_open_url = f"http://100.80.29.31:8080/?doc={quote(dest_note.name)}"
-                    btn_html = f'<div style="margin-top:14px;"><a href="{note_open_url}" style="display:inline-block;padding:10px 16px;background:#10b981;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;">📖 Obrir {dest_note.name} a Faristol</a></div>'
-                    msg = f"📝 Nota Markdown desada al Segon Cervell (<code>{dest_note.name}</code>).{btn_html}"
-                    self.wfile.write(render_mobile_portal_html(msg).encode("utf-8"))
                     return
 
                 # Cas 4: URL o DOI compartit des del menú Compartir d'Android o formulari
